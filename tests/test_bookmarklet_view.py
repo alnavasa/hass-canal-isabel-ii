@@ -22,6 +22,12 @@ the HTML wrapper:
 * Includes the click-blocker on ``.drag-link`` so accidental clicks
   inside the HA UI don't try to execute the bookmarklet against a
   no-Canal-session origin.
+
+The renderer lives in ``bookmarklet.py`` (stdlib-only) on purpose —
+``bookmarklet_view.py`` is a thin HomeAssistantView wrapper that imports
+``aiohttp``, which CI doesn't install (we don't run a real HA in
+unit tests). Loading the wrapper from this test file would break test
+collection.
 """
 
 from __future__ import annotations
@@ -54,13 +60,13 @@ def _load_modules() -> tuple:
         spec.loader.exec_module(m)
         return m
 
-    return _load("const"), _load("bookmarklet"), _load("bookmarklet_view")
+    return _load("const"), _load("bookmarklet")
 
 
-_const, _bm, _view = _load_modules()
+_const, _bm = _load_modules()
 build_bookmarklet = _bm.build_bookmarklet
 build_bookmarklet_source = _bm.build_bookmarklet_source
-render_bookmarklet_page = _view.render_bookmarklet_page
+render_bookmarklet_page = _bm.render_bookmarklet_page
 BOOKMARKLET_PAGE_URL_PREFIX = _const.BOOKMARKLET_PAGE_URL_PREFIX
 
 
