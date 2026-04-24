@@ -164,7 +164,7 @@ class TestBuildBookmarklet:
         assert "//" not in stripped, (
             f"Surviving `//` in minified bookmarklet — would comment out "
             f"the rest of the script. First occurrence at index "
-            f"{stripped.index('//')}: …{stripped[max(0, stripped.index('//') - 40):stripped.index('//') + 80]}…"
+            f"{stripped.index('//')}: …{stripped[max(0, stripped.index('//') - 40) : stripped.index('//') + 80]}…"
         )
 
     def test_prefers_current_dom_over_fetching_fresh_page(self):
