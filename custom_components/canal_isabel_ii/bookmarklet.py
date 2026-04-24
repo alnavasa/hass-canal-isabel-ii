@@ -57,11 +57,6 @@ _BOOKMARKLET_TEMPLATE = r"""
       fail("Estás en " + location.hostname + ".\n\nAbre primero la Oficina Virtual y vuelve a pulsar el favorito.");
       return;
     }
-    // Prefer the current DOM if the user is already on the consumption
-    // page (any filter they've applied — month, date range — is
-    // encoded in the live form inputs). Fall back to fetching the page
-    // only when the form isn't present in the document (user is on a
-    // different page of the portal).
     let doc1, html1, reusedDom;
     if (document.querySelector("#selectPeriodicidad")) {
       doc1 = document;
@@ -81,17 +76,11 @@ _BOOKMARKLET_TEMPLATE = r"""
     const form = sel.closest("form");
     if (!form || !form.action) { fail("Formulario de consumo sin action — portal cambiado."); return; }
     const fd = new FormData();
-    // Capture every named input + select in the form — that's how
-    // the user's date range / month / year selections get carried
-    // through. SELECTs expose `.value` = currently-selected option's
-    // value in both live and parsed DOMs.
     form.querySelectorAll("input, select").forEach((i) => { if (i.name) fd.set(i.name, i.value || ""); });
     fd.set(sel.name, "Horaria");
     let contract = "";
     const cs = doc1.querySelector("#contratosSelect");
     if (cs) {
-      // Live DOM: cs.value is the selected option. Parsed DOM: prefer
-      // the [selected] option, else fall back to the first one.
       const liveVal = reusedDom ? cs.value : "";
       if (liveVal) {
         fd.set(cs.name, liveVal); contract = liveVal;
@@ -150,12 +139,25 @@ def _minify(src: str) -> str:
     we mostly want a single line so it pastes cleanly into a Safari
     bookmark URL field (which doesn't tolerate raw newlines).
 
+    JS line-comments (``//…``) are dropped ENTIRELY because the joiner
+    is a space, not a newline — a surviving ``//`` would swallow every
+    subsequent line of the joined one-liner, silently breaking the
+    bookmarklet. We treat a line as a comment when the first
+    non-whitespace characters are ``//``. (Inline trailing ``// …``
+    comments are NOT stripped — avoid using them in the template; put
+    docs in the Python docstring instead.) The template deliberately
+    contains no `://` URL literals so this rule never misfires.
+
     Keeps string contents intact (no escape-sensitive transforms).
     """
     out_lines: list[str] = []
     for line in src.splitlines():
         s = line.strip()
         if not s:
+            continue
+        # Pure-comment line — drop entirely so the joiner doesn't
+        # produce a runaway comment that eats the rest of the code.
+        if s.startswith("//"):
             continue
         out_lines.append(s)
     joined = " ".join(out_lines)

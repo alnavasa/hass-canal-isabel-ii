@@ -137,6 +137,36 @@ class TestBuildBookmarklet:
         body = unquote(url[len("javascript:") :])
         assert "canaldeisabelsegunda.es" in body
 
+    def test_minified_body_has_no_surviving_line_comments(self):
+        """Regression guard for the v0.4.6 minifier bug.
+
+        The template is minified by joining non-blank lines with a
+        single SPACE (so Safari accepts it — no newlines in a
+        bookmark URL). If any ``//`` survives the join it turns the
+        rest of the script into a line comment, breaking the
+        bookmarklet entirely. The minifier must drop every pure
+        ``//`` line; this test locks that in.
+
+        We decode the javascript: URL, strip the leading scheme, and
+        verify that ``//`` does not appear as a standalone token in
+        the JS body. The only legitimate ``/../`` you'd see is inside
+        a regex literal like ``/\\/+$/`` — which doesn't contain the
+        two-char substring ``//`` — so a literal ``//`` in the body
+        MUST be a leaked comment."""
+        url = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        body = unquote(url[len("javascript:") :])
+        # `://` would be fine (colon-slash-slash) but the template has
+        # no URL literals. Strip any URL-like occurrence first
+        # (defensive in case a future change adds one).
+        stripped = body.replace("://", ":/_/")
+        assert "//" not in stripped, (
+            f"Surviving `//` in minified bookmarklet — would comment out "
+            f"the rest of the script. First occurrence at index "
+            f"{stripped.index('//')}: …{stripped[max(0, stripped.index('//') - 40):stripped.index('//') + 80]}…"
+        )
+
     def test_prefers_current_dom_over_fetching_fresh_page(self):
         """Regression guard for the 2026-04 filter bug — the
         bookmarklet MUST first try the live ``document`` so any

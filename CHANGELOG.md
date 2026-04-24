@@ -3,6 +3,33 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.4.7] — 2026-04-24
+
+### Arreglado
+
+- **Bookmarklet v0.4.6 estaba roto en su forma minificada**. El
+  minifier junta líneas del template JavaScript con un espacio (no
+  con newline, para que Safari acepte la URL como marcador de una
+  sola línea), y v0.4.6 había introducido comentarios `//` que al
+  quedarse sin salto de línea se convertían en un comentario que
+  devoraba el resto del script. Resultado: clicar el favorito no
+  hacía nada visible y el portal seguía sirviéndote el rango por
+  defecto (60 días) — exactamente el comportamiento que v0.4.6
+  pretendía arreglar. Ahora:
+  - El minifier detecta líneas puras de comentario `//…` y las
+    descarta antes de unir, protegiendo contra regresiones futuras.
+  - Los comentarios JS del template se han eliminado; la
+    documentación vive en el docstring de Python donde pertenece.
+  - Un test nuevo verifica que el cuerpo minificado no contiene
+    `//` (salvo dentro de URL literals, de los que no tenemos).
+- **Acordaos de regenerar el bookmarklet**: la URL `javascript:…`
+  guardada en tus favoritos es el minificado del momento de la
+  instalación. Actualizar la integración NO reescribe tu favorito.
+  Tras update: *Ajustes → Desarrollador → Servicios → Canal de Isabel II
+  Mostrar bookmarklet* para que reaparezca la notificación con el
+  código actualizado, luego edita la URL de tu favorito y pega el
+  bloque nuevo.
+
 ## [0.4.6] — 2026-04-24
 
 ### Arreglado
