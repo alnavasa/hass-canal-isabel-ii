@@ -1,0 +1,29 @@
+refresh:
+  name: Refresh sensors
+  description: >
+    Re-process the local cache and refresh sensor attributes
+    (consumption_today_l, etc.). Does NOT pull from the portal — for
+    that, press the bookmarklet in your browser. Useful after a manual
+    edit to ``<config>/.storage/canal_isabel_ii.<entry_id>`` or to
+    force the time-derived attributes to recompute outside the
+    hourly tick.
+  fields:
+    instance:
+      name: Instance
+      description: Free-text installation name OR config entry id of a specific integration. Leave empty to refresh all.
+      example: Casa principal
+      selector:
+        text:
+
+show_bookmarklet:
+  name: Show bookmarklet
+  description: >
+    Re-display the bookmarklet code as a persistent notification.
+    Use after losing the original install message.
+  fields:
+    instance:
+      name: Instance
+      description: Free-text installation name OR config entry id. Leave empty to show all.
+      example: Casa principal
+      selector:
+        text:

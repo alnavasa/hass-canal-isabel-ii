@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.yaml
+factura_*.pdf
+facturas*/
+*PRIVADAS*/
+
+# Build artifacts
+*.zip
+dist/
+build/
+
+# HA local dev artifacts (config / database snapshots if you mount this
+# into a HA dev container during testing).
+config/
+.storage/
+home-assistant.log
+home-assistant_v2.db*

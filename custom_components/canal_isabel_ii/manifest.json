@@ -1,0 +1,12 @@
+{
+    "domain": "canal_isabel_ii",
+    "name": "Canal de Isabel II",
+    "after_dependencies": ["http", "recorder"],
+    "codeowners": ["@alnavasa"],
+    "config_flow": true,
+    "documentation": "https://github.com/alnavasa/hass-canal-isabel-ii",
+    "integration_type": "service",
+    "iot_class": "local_push",
+    "issue_tracker": "https://github.com/alnavasa/hass-canal-isabel-ii/issues",
+    "version": "0.4.5"
+}

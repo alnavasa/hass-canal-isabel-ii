@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Canal de Isabel II",
+        "description": "This integration receives consumption data over HTTP from a *bookmarklet* (a JavaScript favorite) that you click in your browser while logged into the Oficina Virtual.\n\nEnter a name for this installation and the HTTPS URL of your Home Assistant (local or public — both work as long as it's HTTPS). On confirm, a persistent notification will show the bookmarklet code ready to paste.",
+        "data": {
+          "name": "Installation name",
+          "ha_url": "HTTPS URL of Home Assistant"
+        },
+        "data_description": {
+          "name": "Friendly label for your sensors and device (e.g. \"my home\"). The contract number is still used as the internal identifier and is bound automatically the first time you click the bookmarklet.",
+          "ha_url": "Where the bookmarklet will POST. It can be an HTTPS URL on your LAN (an IP or hostname reachable from the browser that will click the bookmarklet) or a public HTTPS URL (DuckDNS, Nabu Casa, Cloudflare Tunnel, etc.) if you want to use it from anywhere. Must be HTTPS in both cases — browsers block HTTP fetches from the HTTPS portal page. Default: {default_url}."
+        }
+      }
+    },
+    "error": {
+      "missing_ha_url": "An HTTPS URL (local or public) is required so the bookmarklet can POST from your browser. Configure external_url/internal_url in Settings → System → Network, or type it manually here.",
+      "invalid_ha_url": "The URL must start with http:// or https://. HTTPS is recommended in all cases: browsers block HTTP fetches from the HTTPS portal page."
+    },
+    "abort": {
+      "reauth_not_supported": "There's no HA-side session that can expire — the data is pushed by your browser via bookmarklet. To rotate the token, delete this integration and add it again."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "hourly_consumption": {
+        "name": "Latest hourly consumption"
+      },
+      "cumulative_consumption": {
+        "name": "Period consumption"
+      },
+      "meter_reading": {
+        "name": "Meter reading"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh sensors",
+      "description": "Re-process the local cache and refresh attributes. Does NOT fetch anything from the portal — that's only done via the bookmarklet in your browser.",
+      "fields": {
+        "instance": {
+          "name": "Installation",
+          "description": "Name or entry_id of a specific integration. Empty = all."
+        }
+      }
+    },
+    "show_bookmarklet": {
+      "name": "Show bookmarklet",
+      "description": "Re-publish the bookmarklet in a persistent notification — useful if you lost the original one.",
+      "fields": {
+        "instance": {
+          "name": "Installation",
+          "description": "Name or entry_id of the integration whose bookmarklet you want to see."
+        }
+      }
+    }
+  }
+}
