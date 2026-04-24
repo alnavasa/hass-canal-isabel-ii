@@ -333,8 +333,8 @@ separado**, con sus tres sensores y su propia estadística externa.
 ## 8. Debugging — saber por qué un sensor no actualiza
 
 ```yaml
-# Developer Tools → Servicios
-service: logger.set_level
+# Herramientas para desarrolladores → Acciones
+action: logger.set_level
 data:
   custom_components.canal_isabel_ii: debug
 ```

@@ -4,8 +4,9 @@
 
 ```
 1. HACS instala la integración           ──►  Reinicia HA
-2. Añadir integración (nombre + URL HA)  ──►  Notificación con bookmarklet
-3. Pegar bookmarklet en favoritos        ──►  En cada navegador donde lo uses
+2. Añadir integración (nombre + URL HA)  ──►  Notificación → página de instalación
+3. Página: arrastrar (escritorio) o      ──►  Favorito creado
+   📋 copiar (móvil)
 4. Login en oficinavirtual.canal…        ──►  Click favorito → POST automático
 5. Sensores aparecen                      ──►  ✅ Listo. Repite paso 4 cuando quieras refrescar
 ```
@@ -111,7 +112,9 @@ Lo que pasa por dentro:
 
 - Se crea la **entry** con un `entry_id` único.
 - Se genera un **token de 192 bits** (`secrets.token_hex(24)`).
-- Aparece una **notificación persistente** con el bookmarklet listo.
+- Aparece una **notificación persistente corta** que enlaza a la página de
+  instalación del bookmarklet (servida por la propia integración en
+  `/api/canal_isabel_ii/bookmarklet/<entry_id>`).
 - Los sensores **todavía no existen** — se materializan en el primer POST.
 
 > Verás primero un modal "✅ Éxito · Configuración creada para <nombre>" con
@@ -120,69 +123,71 @@ Lo que pasa por dentro:
 
 ---
 
-## 3.5 Encontrar la notificación con el bookmarklet
+## 3.5 Página de instalación del bookmarklet
 
-Este paso es el que suele confundir — la notificación **no** es un popup,
-se queda guardada en el panel de notificaciones de HA.
+La notificación es **corta** y enlaza a una página HTML que la integración
+sirve en `/api/canal_isabel_ii/bookmarklet/<entry_id>`. La página
+sustituye al antiguo "copia este bloque de código markdown a mano" y es
+la forma recomendada de instalar el favorito.
 
-### Dónde está la notificación
+### Cómo llegar a la página
 
-En la barra lateral izquierda de HA, abajo del todo, hay un icono de
-**campana** 🔔 con un punto rojo cuando hay notificaciones nuevas. Pulsa en
-esa campana y verás un panel lateral con todas las notificaciones; la que
-acabas de generar se titula:
+1. Pulsa la **campana** 🔔 (barra lateral izquierda de HA, abajo del todo).
+2. Abre la notificación **"Bookmarklet listo — <nombre instalación>"**.
+3. Pulsa **📥 Abrir página de instalación**. Se abre en una pestaña nueva.
 
-> **Canal de Isabel II — bookmarklet listo (Casa principal)**
+> La página usa la cookie de sesión de HA para autenticarte; **no hay tokens
+> en la URL**. Si no estás logado en HA, te llevará primero al login y
+> después a la página.
 
-*(cambia "Casa principal" por el nombre que hayas puesto en el paso 3).*
+### Qué encuentras en la página
 
-### Qué contiene
+Una sección por cada URL de HA (si tienes `internal_url` y `external_url`,
+verás 2 secciones — LAN + externo, etiquetadas), y dentro de cada sección
+**dos formas** de instalar el favorito:
 
-La notificación es un bloque markdown con varias secciones:
+| Forma                              | Cuándo conviene                                                  | Qué hace                                                                                                |
+|------------------------------------|------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| **★ Canal → HA** (botón arrastrable) | Escritorio (Safari Mac, Chrome, Firefox, Edge)                  | Lo arrastras directamente a la **barra de favoritos**. Click suelto está bloqueado (preventDefault + alert) — clicarlo dentro de HA no haría nada útil porque ahí no hay sesión del Canal. |
+| **📋 Copiar bookmarklet** (botón)    | Móvil (iOS Safari, Chrome Android) y cualquier navegador         | Copia al portapapeles via `navigator.clipboard.writeText()`. Crea un favorito cualquiera, edita su URL y pega. |
 
-1. **"Paso 1 · Crea un favorito en tu navegador"** — instrucciones cortas por
-   navegador (Mac Safari, iOS Safari, Chrome, Firefox).
-2. **Un bloque de código `javascript:…`** — ESTE es el bookmarklet minificado
-   que tienes que pegar en la URL del favorito. Es una línea muy larga.
-3. **"Paso 2 · Úsalo"** — 5 pasos breves para el primer click.
-4. **"Datos técnicos"** — la URL de HA, el entry id, el token y el endpoint
-   completo. Guárdatelos por si pierdes la notificación (aunque siempre
-   puedes regenerarlos con el servicio `canal_isabel_ii.show_bookmarklet`).
-5. **`<details>` desplegable "Código JavaScript legible"** — el mismo JS
-   indentado, por si quieres auditar qué hace antes de ejecutarlo.
+Además la página incluye, plegados:
 
-### Cómo copiar el `javascript:…`
+- **Cómo usarlo (paso a paso)** — 6 puntos con el flujo de uso.
+- **Datos técnicos** — URL HA, entry id, token, endpoint de ingest. Útil
+  para auditoría / debugging.
+- **Código JavaScript legible (sin minificar)** — la fuente del bookmarklet
+  multi-línea, por si quieres revisar qué hace antes de ejecutarlo.
 
-En el panel de notificaciones de HA los bloques de código no siempre
-muestran un botón "Copiar" — depende de la versión del frontend. Dos rutas
-seguras:
+### Si el botón Copiar falla
 
-1. **Triple-click** dentro del bloque de código para seleccionar toda la
-   línea → **Cmd+C** (Mac) / **Ctrl+C** (Windows/Linux).
-2. Si prefieres la vista expandida, abre la notificación haciendo click en
-   su título. Se abre un modal con la misma info en grande, y los bloques
-   de código aparecen con más espacio alrededor para seleccionar limpio.
+Algunos contextos bloquean el `navigator.clipboard` (HTTPS auto-firmado sin
+aceptar, modo privado, IFrame raro). En ese caso la página cae a un
+`window.prompt()` con el texto preseleccionado — **long-press → Copiar** en
+móvil, o **Cmd+C / Ctrl+C** en escritorio. Es un fallback automático, no
+tienes que hacer nada.
 
-### ¿Se ha cerrado sin querer?
+### ¿Se ha cerrado la notificación sin querer?
 
-No pasa nada. Abre **Herramientas para desarrolladores → Servicios**
-(o *Ajustes → Herramientas para desarrolladores → Servicios* según
-versión), busca el servicio `canal_isabel_ii.show_bookmarklet` y pulsa
-**Realizar servicio**. La notificación vuelve a aparecer con el mismo
-contenido. Si tienes varias integraciones y quieres sólo la de una
-instalación concreta, añade el campo opcional `instance: Casa principal`.
+No pasa nada. Abre **Herramientas para desarrolladores → Acciones**
+(o *Ajustes → Herramientas para desarrolladores → Acciones* según
+versión), busca la acción `canal_isabel_ii.show_bookmarklet` y pulsa
+**Realizar acción**. La notificación vuelve a aparecer con el mismo enlace
+a la misma página. Si tienes varias integraciones y quieres sólo una,
+añade el campo opcional `instance: Casa principal`.
 
 ---
 
-## 4. Instalar el bookmarklet (por navegador)
+## 4. Si prefieres pegar el bookmarklet manualmente (fallback)
 
-Ya tienes el `javascript:…` copiado de la notificación. Ahora lo pegas como
-URL de un favorito en tu navegador.
+La página HTML de §3.5 es la ruta recomendada. Esta sección sólo es útil
+si la página no se abre por algún motivo (HA caído, cookie expirada en una
+sesión rara) y necesitas pegar el bookmarklet en bruto desde el bloque
+`<details>` colapsado de la notificación.
 
-> La notificación incluye también una vista **"Código JavaScript legible"**
-> (fuente multi-línea, indentada) para auditar lo que hace el bookmarklet
-> antes de ejecutarlo. **Eso NO es lo que pegas** — pegas siempre la
-> versión minificada de una línea que empieza por `javascript:`.
+> El bloque `<details>` de la notificación trae siempre el `javascript:…`
+> en bruto y los datos técnicos como fallback. Es exactamente lo que ofrece
+> la página de instalación, sin la UX de los botones.
 
 ### Safari macOS
 
@@ -192,18 +197,20 @@ URL de un favorito en tu navegador.
 4. Renombra a algo memorable: **`Canal → HA`**.
 5. Arrástralo a la **barra de favoritos** si quieres tenerlo a 1 click.
 
-### iOS Safari (truco con iCloud)
+### iOS Safari — truco con iCloud Safari Sync
 
-iOS no deja editar URLs de favoritos directamente — pero sí sincroniza desde Mac:
+iOS no deja editar URLs de favoritos directamente desde el iPhone, pero sí
+los sincroniza desde Mac:
 
 1. Crea el favorito en **Safari Mac** como en la sección de arriba.
 2. Asegúrate de tener iCloud → Safari activado en ambos dispositivos.
 3. En segundos aparece en iOS Safari: Marcadores → Mobile Bookmarks → tu carpeta.
-4. **Pulsalo** mientras estás en el portal de Canal.
+4. **Púlsalo** mientras estás en el portal de Canal.
 
-> **Atajo alternativo (sin Mac)**: la app **Atajos.app** de iOS permite crear
-> un atajo "Ejecutar JavaScript en página web" que pega el mismo JS. Tutorial:
-> [docs/IOS_SHORTCUT.md](IOS_SHORTCUT.md) (próximamente).
+> Sin Mac: el botón **📋 Copiar bookmarklet** de la página de §3.5 funciona
+> perfectamente en iOS Safari. Crear el favorito y pegar la URL editada se
+> hace desde la propia app de Safari iOS — sólo lleva un par más de toques
+> que el flujo Mac+Sync, pero no necesita ningún Mac.
 
 ### Chrome / Edge (PC, Mac, Android escritorio)
 
@@ -221,11 +228,12 @@ iOS no deja editar URLs de favoritos directamente — pero sí sincroniza desde 
 
 ### Chrome Android / Firefox Android
 
-Móviles Android no permiten editar URLs de favoritos en la UI estándar. Mismas
-opciones que iOS:
+Móviles Android no permiten editar URLs de favoritos en la UI estándar. Lo
+más cómodo es:
 
-- Crea el favorito en Chrome PC y déjalo sincronizar (cuenta Google → Sync).
-- O usa una app específica de tipo "JavaScript runner" (no recomendado por seguridad).
+- Usar el botón **📋 Copiar bookmarklet** de la página de §3.5, crear un
+  favorito en Chrome PC, sincronizarlo a Android via cuenta Google → Sync.
+- O instalarlo desde Chrome PC y dejar que el Chrome Sync lo propague.
 
 ---
 
@@ -368,7 +376,7 @@ para no perder datos — sólo retrasarás un poco la actualización del panel.
 
 | Síntoma                                                  | Probable causa                              | Qué hacer                                                                                                       |
 |----------------------------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
-| Notificación con bookmarklet no apareció tras añadir     | Race en el primer setup                     | Lanza `canal_isabel_ii.show_bookmarklet` desde Developer Tools → Servicios.                                     |
+| Notificación con bookmarklet no apareció tras añadir     | Race en el primer setup                     | Lanza `canal_isabel_ii.show_bookmarklet` desde *Herramientas para desarrolladores → Acciones*.                  |
 | Click bookmarklet → "Estás en `dominio.com`"            | Favorito pulsado fuera del portal           | Abre la Oficina Virtual antes y reintenta.                                                                       |
 | `fetch failed` / mixed content en consola del navegador  | HA por HTTP, no HTTPS                       | Pon HA detrás de HTTPS público (DuckDNS, Nabu Casa, Cloudflare Tunnel).                                         |
 | `CORS preflight failed`                                  | Origin del bookmarklet bloqueado            | Mira logs de HA: el `CanalIngestView` registra qué origin rechazó. Verifica que clicas desde el portal real.    |

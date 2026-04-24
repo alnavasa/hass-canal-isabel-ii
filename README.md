@@ -77,38 +77,33 @@ Al pulsar **Enviar**:
 
 1. Se crea la entry y se genera un **token único** (192 bits, `secrets.token_hex(24)`).
 2. Aparece un modal corto "✅ Éxito · Configuración creada para <nombre>" → pulsa **Terminar**.
-3. Inmediatamente se publica una **notificación persistente** (campana 🔔 de la barra lateral). Ábrela: contiene
-   - El **bookmarklet minificado** (URL `javascript:…` larga) en un bloque de código para copiar.
-   - Instrucciones paso a paso por navegador (Safari Mac, iOS Safari, Chrome, Firefox).
-   - El JS legible (no minificado) dentro de un `<details>` desplegable, por si quieres auditarlo.
+3. Inmediatamente se publica una **notificación persistente** (campana 🔔 de la barra lateral). Es **corta** y enlaza a una **página de instalación** servida por la propia integración con dos botones (arrastrar / copiar) — todo el dolor de seleccionar y copiar 1.5 KB de URL escapada desde un bloque de código markdown está resuelto ahí.
 4. Los sensores **aún no existen** — se crean en el primer POST exitoso del bookmarklet. El dispositivo aparece vacío hasta entonces.
 
 > **Si cerraste la notificación sin querer**: ejecuta el servicio
 > `canal_isabel_ii.show_bookmarklet` desde **Herramientas para desarrolladores →
-> Servicios** y la notificación vuelve a aparecer con el mismo contenido (mismo
+> Acciones** y la notificación vuelve a aparecer con el mismo contenido (mismo
 > token, mismo entry_id — nada cambia).
 
-### 3. Copiar el bookmarklet desde la notificación
+### 3. Instalar el bookmarklet desde la página de instalación
 
-1. Pulsa la campana 🔔 (barra lateral izquierda de HA, abajo).
-2. Abre la notificación **"Canal de Isabel II — bookmarklet listo (<nombre>)"**.
-3. Dentro del bloque de código `javascript:…`, haz **triple-click** para seleccionar toda la línea → **Cmd+C** / **Ctrl+C**.
-4. Ya tienes el bookmarklet en el portapapeles. Continúa con el paso 4.
+1. Pulsa la campana 🔔 (barra lateral izquierda de HA, abajo) y abre la notificación **"Bookmarklet listo — <nombre>"**.
+2. Pulsa **📥 Abrir página de instalación** dentro de la notificación. Se abre una página HTML servida por HA en `/api/canal_isabel_ii/bookmarklet/<entry_id>` con tu sesión de HA (no hay tokens en la URL).
+3. La página te ofrece **dos formas** de instalar el favorito:
 
-> Guía visual detallada paso a paso (incluido qué hacer en cada navegador, truco iOS, etc.): [docs/SETUP.md](docs/SETUP.md).
+   | Cómo | Cuándo | Qué hacer |
+   |------|--------|-----------|
+   | **★ Canal → HA** (enlace estilo botón) | Escritorio (Safari Mac, Chrome, Firefox, Edge) | **Arrástralo** a la barra de favoritos. *No lo pulses* — un click suelto bloquea la ejecución (el bookmarklet no tiene sentido en HA, sin sesión del Canal). |
+   | **📋 Copiar bookmarklet** (botón) | Móvil (iOS Safari, Chrome Android) y cualquier navegador | Copia al portapapeles. Crea un favorito cualquiera, edita su URL y pega. |
 
-### 4. Pegar el bookmarklet como URL de un favorito
+   Si tu HA tiene `internal_url` y `external_url` configuradas, la página renderiza una sección por cada variante (LAN + externo) con sus propios botones — instala el que vayas a usar (o ambos, para alternar).
 
-**Safari macOS / Chrome / Firefox / Edge**:
-1. Crea un favorito cualquiera (en una página que tengas abierta — da igual cuál).
-2. **Edita** el favorito (click derecho → Editar, o *Marcadores → Editar marcadores*).
-3. **Pega** el `javascript:…` que copiaste en el campo *URL* del favorito.
-4. Renómbralo a algo reconocible: **"Canal → HA"**, o `Canal: Casa` si tienes varios.
-5. Abre la Oficina Virtual, loguéate, **clica el favorito**.
+4. Renómbralo a algo memorable: **"Canal → HA"** (o `Canal: Casa` si tienes varios contratos).
+5. Abre la Oficina Virtual, loguéate y **clica el favorito**.
 
-**iOS Safari** (truco): no deja editar URLs de favoritos directamente desde el móvil. Crea el favorito en Safari Mac con iCloud → Safari activado; en segundos aparece sincronizado en el iPhone. Alternativa sin Mac: un atajo de Atajos.app (documentado en `docs/SETUP.md`).
+> **Truco iOS sin botón Copiar**: si el `navigator.clipboard` falla (HTTPS auto-firmado sin aceptar, modo privado, etc.) la página cae a `window.prompt()` con el texto preseleccionado — long-press → Copiar. Detalles + truco con iCloud Safari Sync para sincronizar el favorito desde un Mac: [docs/SETUP.md](docs/SETUP.md).
 
-### 5. Primer click → sensores aparecen
+### 4. Primer click → sensores aparecen
 
 Al pulsar el bookmarklet desde la página del portal:
 
