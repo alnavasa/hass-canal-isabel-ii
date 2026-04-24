@@ -7,10 +7,16 @@ Canal portal, it:
 
 1. Verifies the user is on ``oficinavirtual.canaldeisabelsegunda.es``
    (bails with an alert otherwise).
-2. Loads the consumption page, parses out the form so the next POST
-   carries every hidden Liferay nonce + the contract dropdown
-   selection.
-3. POSTs the form switching periodicity to "Horaria" (hourly).
+2. **If the user is already on ``/group/ovir/consumo`` with a rendered
+   form** (including any date-range / periodicity filters they've
+   applied), reuses that DOM as-is. Otherwise it fetches the page
+   fresh. This is what lets the user cherry-pick an arbitrary month
+   (e.g. "January 2026") in the portal UI and have the bookmarklet
+   honour that filter — the default fetched page only exposes the
+   rolling 60-day window.
+3. POSTs the form switching periodicity to "Horaria" (hourly) while
+   preserving every other field (date inputs, contract, Liferay
+   nonces).
 4. Finds the ``export-csv`` link in the response, downloads the CSV.
 5. Optionally extracts the four-card meter summary from the same HTML.
 6. POSTs ``{csv, meter_summary, consumption_page_html}`` as JSON to
@@ -51,23 +57,48 @@ _BOOKMARKLET_TEMPLATE = r"""
       fail("Estás en " + location.hostname + ".\n\nAbre primero la Oficina Virtual y vuelve a pulsar el favorito.");
       return;
     }
-    log("Loading consumption page…");
-    const r1 = await fetch("/group/ovir/consumo", { credentials: "include" });
-    if (!r1.ok) { fail("Portal no autenticado (HTTP " + r1.status + ").\n\nEntra a la Oficina Virtual y vuelve a pulsar."); return; }
-    const html1 = await r1.text();
-    const doc1 = new DOMParser().parseFromString(html1, "text/html");
+    // Prefer the current DOM if the user is already on the consumption
+    // page (any filter they've applied — month, date range — is
+    // encoded in the live form inputs). Fall back to fetching the page
+    // only when the form isn't present in the document (user is on a
+    // different page of the portal).
+    let doc1, html1, reusedDom;
+    if (document.querySelector("#selectPeriodicidad")) {
+      doc1 = document;
+      html1 = document.documentElement.outerHTML;
+      reusedDom = true;
+      log("Reusing current DOM (honours your on-screen filters).");
+    } else {
+      log("Loading consumption page (no form visible)…");
+      const r1 = await fetch("/group/ovir/consumo", { credentials: "include" });
+      if (!r1.ok) { fail("Portal no autenticado (HTTP " + r1.status + ").\n\nEntra a la Oficina Virtual y vuelve a pulsar."); return; }
+      html1 = await r1.text();
+      doc1 = new DOMParser().parseFromString(html1, "text/html");
+      reusedDom = false;
+    }
     const sel = doc1.querySelector("#selectPeriodicidad");
     if (!sel) { fail("No se encuentra el selector de periodicidad — sesión expirada o portal cambiado."); return; }
     const form = sel.closest("form");
     if (!form || !form.action) { fail("Formulario de consumo sin action — portal cambiado."); return; }
     const fd = new FormData();
-    form.querySelectorAll("input").forEach((i) => { if (i.name) fd.set(i.name, i.value || ""); });
+    // Capture every named input + select in the form — that's how
+    // the user's date range / month / year selections get carried
+    // through. SELECTs expose `.value` = currently-selected option's
+    // value in both live and parsed DOMs.
+    form.querySelectorAll("input, select").forEach((i) => { if (i.name) fd.set(i.name, i.value || ""); });
     fd.set(sel.name, "Horaria");
     let contract = "";
     const cs = doc1.querySelector("#contratosSelect");
     if (cs) {
-      const opt = cs.querySelector("option[selected]") || cs.querySelector("option");
-      if (opt && opt.value) { fd.set(cs.name, opt.value); contract = opt.value; }
+      // Live DOM: cs.value is the selected option. Parsed DOM: prefer
+      // the [selected] option, else fall back to the first one.
+      const liveVal = reusedDom ? cs.value : "";
+      if (liveVal) {
+        fd.set(cs.name, liveVal); contract = liveVal;
+      } else {
+        const opt = cs.querySelector("option[selected]") || cs.querySelector("option");
+        if (opt && opt.value) { fd.set(cs.name, opt.value); contract = opt.value; }
+      }
     }
     log("Switching to Horaria…");
     const r2 = await fetch(form.action, { method: "POST", body: fd, credentials: "include" });
@@ -250,10 +281,15 @@ def format_install_notification(
         "como siempre (DNI + contraseña + captcha si aparece).\n"
         "2. Asegúrate de que el dropdown de contrato (arriba a la derecha) "
         "muestra el contrato que quieres importar a esta integración.\n"
-        "3. Pulsa el favorito que acabas de crear.\n"
-        '4. Verás un alert con el resumen: "Canal -> HA - Contrato: ..., '
+        "3. *(Opcional, para histórico)* Si quieres importar un mes concreto del "
+        "pasado, entra en **Mi consumo**, filtra el rango de fechas deseado "
+        "(p.ej. del 1 al 31 de enero) con frecuencia **Horaria**, y pulsa "
+        "**Ver** para que la tabla se actualice. El bookmarklet leerá tu "
+        "selección actual.\n"
+        "4. Pulsa el favorito que acabas de crear.\n"
+        '5. Verás un alert con el resumen: "Canal -> HA - Contrato: ..., '
         'Lecturas importadas: ...".\n'
-        "5. Vuelve a HA y verás los sensores creados en *Ajustes -> "
+        "6. Vuelve a HA y verás los sensores creados en *Ajustes -> "
         "Dispositivos y servicios -> Canal de Isabel II*.\n\n"
         "### Datos técnicos (por si se te pierde el bookmarklet)\n"
         f"- **URL HA**: `{ha_url}`\n"
@@ -266,8 +302,13 @@ def format_install_notification(
         "```\n"
         "</details>\n\n"
         "### Cuándo pulsar el bookmarklet\n"
-        "- **Setup inicial**: ahora mismo, para importar los últimos meses de "
-        "histórico (Canal mantiene ~7 meses).\n"
+        "- **Setup inicial**: ahora mismo, para importar los últimos 60 días (el "
+        "rango por defecto de la Oficina Virtual).\n"
+        "- **Histórico de meses anteriores**: filtra el rango que quieras en la "
+        "Oficina Virtual (p.ej. enero entero), pulsa **Ver** para aplicar el "
+        "filtro, y luego pulsa el favorito. La integración detecta los días "
+        "nuevos y los mete en las estadísticas horarias retroactivamente — "
+        "aparecerán en el panel Energía → Agua.\n"
         "- **Mantenimiento**: 1-2 veces por semana es suficiente. La integración "
         "hace upsert idempotente, no duplica datos.\n"
         "- **Mismo contrato siempre**: este bookmarklet está vinculado al "

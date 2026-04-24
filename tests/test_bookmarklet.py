@@ -137,6 +137,43 @@ class TestBuildBookmarklet:
         body = unquote(url[len("javascript:") :])
         assert "canaldeisabelsegunda.es" in body
 
+    def test_prefers_current_dom_over_fetching_fresh_page(self):
+        """Regression guard for the 2026-04 filter bug — the
+        bookmarklet MUST first try the live ``document`` so any
+        portal filter the user has applied (date range, month)
+        survives the click. The fetch is only a fallback when the
+        user isn't on the consumption page yet.
+
+        If this test fires, someone rewrote the bookmarklet to
+        always fetch ``/group/ovir/consumo`` afresh and dropped the
+        DOM-first branch — which silently ignores the user's
+        on-screen filters (they get "imported: 1439, new: 0" when
+        they've filtered January)."""
+        url = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        body = unquote(url[len("javascript:") :])
+        # We check the structure rather than the minified form: the
+        # live-DOM branch tests #selectPeriodicidad presence on
+        # ``document`` before falling back to fetch.
+        assert "document.querySelector" in body
+        assert "#selectPeriodicidad" in body
+        # Fetch-as-fallback is still present (user may click from
+        # portal home).
+        assert "/group/ovir/consumo" in body
+
+    def test_captures_select_elements_not_just_inputs(self):
+        """Capture the user's dropdown selections (month/year/etc.)
+        in the form body — the form contains ``<select>`` elements
+        as well as ``<input>``."""
+        url = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        body = unquote(url[len("javascript:") :])
+        # The selector must include both input and select so the
+        # user's dropdown picks (months, years) travel with the POST.
+        assert "input, select" in body or "input,select" in body
+
     def test_quotes_within_install_name_dont_break_js(self):
         # Free-text user input must not let the user inject extra JS.
         url = build_bookmarklet(

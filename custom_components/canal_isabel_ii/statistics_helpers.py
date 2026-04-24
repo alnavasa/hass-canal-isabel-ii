@@ -69,3 +69,115 @@ def continuation_stats(
         running += liters
         out.append((ts_utc, running))
     return out
+
+
+def needs_backfill(
+    items: list[tuple[datetime, float]],
+    last_start: datetime | None,
+) -> bool:
+    """Return True if the push includes a timestamp at or before ``last_start``.
+
+    ``continuation_stats`` blocks every such row (it treats them as
+    "already in HA"). That's the right default for rolling-forward
+    pushes — but a user who explicitly filtered the portal to a past
+    month will trip this guard on every single row. Detecting that
+    case here is what lets the caller branch into the
+    ``merge_forward_and_backfill`` recomputation path.
+
+    ``last_start is None`` means "no previous stats" → nothing to
+    backfill, let the cold-start path in ``continuation_stats`` run.
+    """
+    if last_start is None or not items:
+        return False
+    return any(ts <= last_start for ts, _ in items)
+
+
+def merge_forward_and_backfill(
+    new_items: list[tuple[datetime, float]],
+    existing_rows: list[tuple[datetime, float]],
+) -> list[tuple[datetime, float]]:
+    """Merge a backfill push with existing statistics into a full replay.
+
+    ## The problem
+
+    ``continuation_stats`` is purpose-built for "add hours after
+    ``last_start``", and it refuses to touch anything older. That's
+    correct for the default rolling-forward flow, where a
+    past-timestamp row would almost always be a rogue duplicate from
+    a stale cache. But it breaks the user-intentional backfill case:
+    the user filters the portal to January, pulls the CSV, and the
+    algorithm silently drops every row because January lies entirely
+    before ``last_start`` (which is "this week").
+
+    ## The invariant this function exploits
+
+    The Energy dashboard computes each hour's bar as
+    ``sum[n] - sum[n-1]`` — it does NOT read the absolute ``sum``.
+    So if we shift the entire running-sum series by a constant, every
+    bar stays the same. In particular, recomputing from zero over
+    the merged series produces the *same bars* as the old series for
+    every hour that was already stored, plus correct bars for the
+    newly-inserted hours. The end-of-series ``sum`` will differ by
+    a constant offset, but only the last row of the OLD series was
+    ever visible to anyone as "sum at last_start" — every older row's
+    role is to render its one bar, which is invariant.
+
+    ## What we do
+
+    1. Convert ``existing_rows`` (``(start, sum)`` from HA's recorder)
+       back into deltas via ``delta[i] = sum[i] - sum[i-1]`` (first
+       row's delta is its ``sum`` — equivalent to assuming running
+       started at zero).
+    2. Merge those deltas with ``new_items`` deltas. On timestamp
+       collision, **new wins** (a re-downloaded CSV for the same hour
+       is authoritative; the user is explicitly rewriting history).
+    3. Sort by timestamp, recompute a monotonic running sum from
+       zero, return ``(start, running)`` pairs for every slot.
+
+    The caller then upserts the whole list via
+    ``async_add_external_statistics``. HA's ``(statistic_id, start)``
+    upsert semantics mean the overlap rows get overwritten with
+    their (unchanged, modulo the offset) values, and the new rows
+    get inserted in their chronological place.
+
+    ## Edge cases
+
+    - Empty ``existing_rows``: degenerates to ``continuation_stats``
+      cold start (sum from zero, no filter).
+    - Empty ``new_items``: returns the existing series re-rendered
+      from zero — a no-op for anyone reading bar heights. Harmless
+      to upsert but the caller should skip for efficiency.
+    - Timestamp collisions: the item in ``new_items`` replaces the
+      one in ``existing_rows``. This is how a user who re-downloads
+      the portal for the same range gets their latest values.
+    """
+    # Invert existing running-sum into deltas.
+    existing_sorted = sorted(existing_rows, key=lambda x: x[0])
+    existing_deltas: dict[datetime, float] = {}
+    prev_sum = 0.0
+    for ts, running in existing_sorted:
+        delta = running - prev_sum
+        # Defensive: a negative delta would mean the stored series
+        # already has a regression. Pin to 0 so the merged replay
+        # stays monotonic. This should never happen with our own
+        # writes but protects against manual recorder edits.
+        if delta < 0:
+            delta = 0.0
+        existing_deltas[ts] = delta
+        prev_sum = running
+
+    # Merge — new items take precedence on collision.
+    merged: dict[datetime, float] = dict(existing_deltas)
+    for ts, liters in new_items:
+        merged[ts] = liters
+
+    # Replay from zero.
+    if not merged:
+        return []
+    rows = sorted(merged.items(), key=lambda x: x[0])
+    out: list[tuple[datetime, float]] = []
+    running = 0.0
+    for ts, liters in rows:
+        running += liters
+        out.append((ts, running))
+    return out

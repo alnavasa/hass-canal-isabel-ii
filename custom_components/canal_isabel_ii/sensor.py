@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.recorder import get_instance as get_recorder_instance
@@ -15,6 +15,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -40,7 +41,11 @@ from .attribute_helpers import (
 from .const import CONF_NAME, DEFAULT_NAME, DOMAIN, STATISTICS_SOURCE
 from .coordinator import CanalCoordinator
 from .models import MeterSummary, Reading
-from .statistics_helpers import continuation_stats
+from .statistics_helpers import (
+    continuation_stats,
+    merge_forward_and_backfill,
+    needs_backfill,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -326,30 +331,47 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         return base
 
     async def _push_statistics(self) -> None:
-        """Append fresh hourly readings to the long-term external statistics.
+        """Push hourly readings to the long-term external statistics.
 
-        ## The trap this method is built around
+        Two distinct paths, picked dynamically per call:
+
+        ## Rolling-forward path (the common case)
+
+        Push only truly new hours — every timestamp strictly after
+        the last stored ``(start, sum)``. The running total continues
+        from ``last_sum`` so the curve joins seamlessly. Idempotent:
+        re-pushing the same rows is a no-op; a shrunken local cache
+        emits nothing (see ``continuation_stats`` for the full
+        invariant discussion).
+
+        ## Backfill path (user pulled a past month)
+
+        If *any* item in the push lies at or before ``last_start``,
+        we assume the user explicitly filtered the portal to a
+        historical range they want imported. We:
+
+        1. Read the FULL existing series for this ``statistic_id``
+           back to the earliest timestamp we're about to write (plus
+           anything already older than that, so the replay covers
+           the whole chart).
+        2. Invert each row's running ``sum`` into a per-hour delta.
+        3. Merge those deltas with the new push (new wins on
+           timestamp collision — re-downloaded CSV is
+           authoritative).
+        4. Recompute the running sum from zero and upsert the entire
+           merged series.
+
+        Why the full replay is safe: the Energy dashboard draws each
+        bar as ``sum[n] - sum[n-1]``, which is invariant to a
+        uniform shift of the running sum — replacing the series
+        with a zero-anchored one leaves every rendered bar
+        unchanged, while naturally interleaving the newly-inserted
+        hours in their chronological position.
 
         ``async_add_external_statistics`` upserts by ``(statistic_id,
-        start)``, so re-pushing the same hour overwrites whatever was
-        stored for that slot. The Energy dashboard renders the
-        bar height from the per-hour ``sum`` *delta* (``sum_n -
-        sum_{n-1}``). Combine the two and a naïve "always recompute
-        the running total from zero" produces a catastrophic visual
-        spike whenever the local cache shrinks.
-
-        ## What this method does instead
-
-        1. Read the LAST stored ``(start, sum)`` for this
-           ``statistic_id`` via ``get_last_statistics``.
-        2. Continue the running total from that ``sum`` (not from
-           zero).
-        3. Skip every reading whose timestamp is ``<=`` the last
-           stored one — we never rewrite history.
-
-        Net effect: the chart is always monotonically growing,
-        immune to local cache wipes, and idempotent across restarts
-        of the integration.
+        start)``, so the full-replay write overwrites every row
+        we've already stored with its (unchanged-modulo-offset) value
+        and inserts the new rows where they belong.
         """
         rows = self._sorted_rows()
         if not rows:
@@ -376,7 +398,7 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
             {"sum"},  # types — only need the running total
         )
         last_sum = 0.0
-        last_start = None
+        last_start: datetime | None = None
         if last_stats and statistic_id in last_stats and last_stats[statistic_id]:
             entry = last_stats[statistic_id][0]
             last_sum = float(entry.get("sum") or 0.0)
@@ -392,6 +414,10 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
             if ts_local.tzinfo is None:
                 ts_local = ts_local.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
             items.append((ts_local.astimezone(dt_util.UTC), r.liters))
+
+        if needs_backfill(items, last_start):
+            await self._push_backfill(statistic_id, metadata, items)
+            return
 
         new_pairs = continuation_stats(items, last_sum=last_sum, last_start=last_start)
         skipped = len(items) - len(new_pairs)
@@ -412,6 +438,75 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
             len(stats),
             last_sum,
             skipped,
+        )
+        async_add_external_statistics(self.hass, metadata, stats)
+
+    async def _push_backfill(
+        self,
+        statistic_id: str,
+        metadata: StatisticMetaData,
+        items: list[tuple[datetime, float]],
+    ) -> None:
+        """Read the full existing series and replay merged with ``items``.
+
+        Separate from ``_push_statistics`` so the rolling-forward path
+        stays cheap (one ``get_last_statistics`` call). This path
+        costs a full ``statistics_during_period`` fetch — acceptable
+        since it only fires when the user deliberately pulls
+        historical data.
+        """
+        # Query back to the earliest timestamp in the push, so every
+        # row we're going to rewrite is already in ``existing_rows``
+        # when we invert-and-merge. Going earlier than that is fine
+        # (and slightly more correct — it folds in any pre-existing
+        # older rows that we'd otherwise miss from the replay).
+        # We pick the unix epoch as "start of time" proxy — HA
+        # internals cap it sensibly.
+        earliest_new = min(ts for ts, _ in items)
+        # Pad an hour back to make sure we don't skip the hour
+        # immediately before the earliest new item.
+        query_from = earliest_new - timedelta(hours=1)
+
+        recorder = get_recorder_instance(self.hass)
+        existing_raw = await recorder.async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            query_from,
+            None,  # end_time: None means up to now
+            {statistic_id},
+            "hour",
+            None,  # default units
+            {"sum"},
+        )
+
+        existing_rows: list[tuple[datetime, float]] = []
+        for row in (existing_raw or {}).get(statistic_id, []):
+            raw_start = row.get("start") or row.get("end")
+            if raw_start is None:
+                continue
+            if isinstance(raw_start, (int, float)):
+                ts = dt_util.utc_from_timestamp(float(raw_start))
+            else:
+                ts = dt_util.parse_datetime(str(raw_start))
+                if ts is None:
+                    continue
+            running = row.get("sum")
+            if running is None:
+                continue
+            existing_rows.append((ts, float(running)))
+
+        merged = merge_forward_and_backfill(items, existing_rows)
+        if not merged:
+            _LOGGER.debug("%s: backfill produced empty merge — skipping", statistic_id)
+            return
+
+        stats = [StatisticData(start=ts, state=running, sum=running) for ts, running in merged]
+        _LOGGER.info(
+            "%s: backfill — replaying %d hourly stats (merging %d new with %d existing)",
+            statistic_id,
+            len(stats),
+            len(items),
+            len(existing_rows),
         )
         async_add_external_statistics(self.hass, metadata, stats)
 

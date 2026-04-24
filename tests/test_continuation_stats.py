@@ -39,6 +39,8 @@ def _load_helper_module():
 
 _helpers = _load_helper_module()
 continuation_stats = _helpers.continuation_stats
+needs_backfill = _helpers.needs_backfill
+merge_forward_and_backfill = _helpers.merge_forward_and_backfill
 
 
 # Same conftest.py override trick as in test_meter_summary_parser.py:
@@ -253,3 +255,169 @@ def test_last_sum_zero_with_last_start_filters_correctly():
     items = [(_hour(0), 100.0), (_hour(1), 50.0)]
     out = continuation_stats(items, last_sum=0.0, last_start=_hour(0))
     assert out == [(_hour(1), 50.0)]
+
+
+# =====================================================================
+# needs_backfill — the mode detector
+# =====================================================================
+
+
+class TestNeedsBackfill:
+    def test_no_items_is_false(self):
+        assert needs_backfill([], last_start=_hour(10)) is False
+
+    def test_no_last_start_is_false(self):
+        """No previous stats → no backfill possible, delegate to
+        cold-start path in continuation_stats."""
+        items = [(_hour(0), 100.0)]
+        assert needs_backfill(items, last_start=None) is False
+
+    def test_all_items_strictly_after_is_false(self):
+        """Rolling-forward push — happy path, stay on the fast path."""
+        items = [(_hour(11), 50.0), (_hour(12), 60.0)]
+        assert needs_backfill(items, last_start=_hour(10)) is False
+
+    def test_item_equal_to_last_start_is_backfill(self):
+        """``<=`` is the same rule continuation_stats uses to skip.
+        If we'd skip it there, backfill should trigger here."""
+        items = [(_hour(10), 50.0)]
+        assert needs_backfill(items, last_start=_hour(10)) is True
+
+    def test_any_item_before_last_start_triggers_backfill(self):
+        """User pulled January, last_start is this week. Every January
+        row is before last_start → backfill."""
+        items = [(_hour(0), 100.0), (_hour(24), 200.0)]
+        assert needs_backfill(items, last_start=_hour(100)) is True
+
+    def test_mixed_recent_and_old_items_triggers_backfill(self):
+        """Mix of past + new: the past rows would be silently dropped
+        by continuation_stats, so we route through the merge path."""
+        items = [(_hour(5), 100.0), (_hour(50), 200.0)]
+        assert needs_backfill(items, last_start=_hour(10)) is True
+
+
+# =====================================================================
+# merge_forward_and_backfill — the replay-from-zero path
+# =====================================================================
+
+
+class TestMergeForwardAndBackfill:
+    def test_empty_existing_behaves_like_cold_start(self):
+        """No prior stats → just running sum over new items, same
+        output as continuation_stats cold start."""
+        items = [(_hour(0), 100.0), (_hour(1), 50.0)]
+        out = merge_forward_and_backfill(items, existing_rows=[])
+        assert out == [(_hour(0), 100.0), (_hour(1), 150.0)]
+
+    def test_empty_new_items_replays_existing(self):
+        """Existing rows round-trip (delta → running sum from zero)."""
+        # Existing stored as running sums: 100, 150, 175
+        existing = [(_hour(0), 100.0), (_hour(1), 150.0), (_hour(2), 175.0)]
+        out = merge_forward_and_backfill([], existing)
+        assert out == [(_hour(0), 100.0), (_hour(1), 150.0), (_hour(2), 175.0)]
+
+    def test_backfill_past_hours_before_existing_series(self):
+        """User backfilling January into a series that only has
+        February onwards. All new hours are inserted at the front
+        of the rendered series."""
+        # Existing: Feb 1 at hour(100), running sum started anywhere
+        existing = [(_hour(100), 500.0), (_hour(101), 510.0)]
+        # New: January hours 0 and 1, 10 L each.
+        items = [(_hour(0), 10.0), (_hour(1), 10.0)]
+        out = merge_forward_and_backfill(items, existing)
+        # The series now has 4 rows, chronologically sorted. Running
+        # sum from zero: 10, 20, then +500 delta gives 520, +10 = 530.
+        # Key invariant: bar heights (sum_n - sum_{n-1}) match the
+        # corresponding deltas (10, 10, 500, 10).
+        assert [ts for ts, _ in out] == [_hour(0), _hour(1), _hour(100), _hour(101)]
+        sums = [s for _, s in out]
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        assert bars == [10.0, 10.0, 500.0, 10.0]
+
+    def test_backfill_overlapping_hours_new_wins_on_collision(self):
+        """Re-downloading the same month after a fix in the portal:
+        timestamp collisions → new value replaces old."""
+        # Existing: hour(5) has a running sum implying 25 L delta.
+        existing = [(_hour(0), 100.0), (_hour(5), 125.0)]
+        # New: same hour(5) but portal now shows 77 L for that slot.
+        items = [(_hour(5), 77.0)]
+        out = merge_forward_and_backfill(items, existing)
+        # Bars: first row 100 (from existing delta), second row 77
+        # (from new) — NOT 25.
+        sums = [s for _, s in out]
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        assert bars == [100.0, 77.0]
+
+    def test_backfill_interleaves_with_existing_series(self):
+        """User backfills hour 5 into an existing [0, 10] series —
+        the merged replay places hour 5 in its chronological slot."""
+        existing = [(_hour(0), 100.0), (_hour(10), 200.0)]
+        items = [(_hour(5), 42.0)]
+        out = merge_forward_and_backfill(items, existing)
+        # Chronological order: 0, 5, 10
+        assert [ts for ts, _ in out] == [_hour(0), _hour(5), _hour(10)]
+        # Running sum from zero: 100, 142, 242 — last row's delta is
+        # the original 200 - 100 = 100 (existing row preserved).
+        sums = [s for _, s in out]
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        assert bars == [100.0, 42.0, 100.0]
+
+    def test_result_is_monotonically_non_decreasing(self):
+        """Sanity: running sum from zero over non-negative deltas
+        can never decrease — matches TOTAL_INCREASING expectations."""
+        existing = [(_hour(0), 50.0), (_hour(2), 80.0)]  # deltas 50, 30
+        items = [(_hour(1), 0.0), (_hour(3), 100.0)]  # deltas 0, 100
+        out = merge_forward_and_backfill(items, existing)
+        sums = [s for _, s in out]
+        assert sums == sorted(sums)
+
+    def test_defensive_negative_existing_delta_pinned_to_zero(self):
+        """Corrupt stored series (e.g. manual recorder edit) that
+        regresses must not propagate the regression into the replay.
+        The affected row becomes a 0 L bar; everything else stays
+        monotonic."""
+        # Second row's sum is LOWER than first — a regression.
+        existing = [(_hour(0), 100.0), (_hour(1), 50.0), (_hour(2), 60.0)]
+        out = merge_forward_and_backfill([], existing)
+        sums = [s for _, s in out]
+        # First delta: 100 (from zero). Second: max(50-100, 0) = 0.
+        # Third: 60 - 50 = 10.
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        assert bars == [100.0, 0.0, 10.0]
+        assert sums == sorted(sums)
+
+    def test_backfill_with_unsorted_inputs(self):
+        """Both new items and existing rows may arrive unsorted —
+        the merge must sort before replaying."""
+        existing = [(_hour(10), 200.0), (_hour(0), 100.0)]  # unsorted
+        items = [(_hour(5), 42.0), (_hour(3), 7.0)]  # unsorted
+        out = merge_forward_and_backfill(items, existing)
+        assert [ts for ts, _ in out] == [_hour(0), _hour(3), _hour(5), _hour(10)]
+
+    def test_bar_heights_preserved_modulo_new_inserts(self):
+        """The central invariant of the whole backfill design: every
+        existing row's rendered bar (sum_n - sum_{n-1}) is preserved
+        after the replay, modulo adjacent inserts which get their own
+        bars. A shift of the running sum baseline is invisible to the
+        Energy dashboard."""
+        # Existing: 5 hours with deltas 10, 20, 30, 40, 50 = cumulative 10/30/60/100/150
+        existing = [
+            (_hour(10), 10.0),
+            (_hour(11), 30.0),
+            (_hour(12), 60.0),
+            (_hour(13), 100.0),
+            (_hour(14), 150.0),
+        ]
+        # New: backfill hours 0-4 with 5 L each (10 L hour-4 collides… no, hour 0-4 vs 10-14).
+        items = [(_hour(h), 5.0) for h in range(5)]
+        out = merge_forward_and_backfill(items, existing)
+        ts_list = [ts for ts, _ in out]
+        sums = [s for _, s in out]
+        # Bars for every row = delta from previous (first = sum[0])
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        # First 5 rows are the new ones, each 5 L.
+        # Next 5 rows are the original deltas (10, 20, 30, 40, 50).
+        assert bars[:5] == [5.0, 5.0, 5.0, 5.0, 5.0]
+        assert bars[5:] == [10.0, 20.0, 30.0, 40.0, 50.0]
+        # Chronology preserved.
+        assert ts_list == [_hour(h) for h in list(range(5)) + list(range(10, 15))]
