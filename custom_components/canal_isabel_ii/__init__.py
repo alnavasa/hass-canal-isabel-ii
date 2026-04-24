@@ -7,12 +7,16 @@ browser does the portal-side heavy lifting and POSTs the result.
 Setup sequence:
 
 1. ``async_setup`` (once per HA boot): register the
-   :class:`CanalIngestView` HTTP endpoint and the services.
+   :class:`CanalIngestView` HTTP endpoint (POST CSV from bookmarklet),
+   the :class:`CanalBookmarkletPageView` HTTP endpoint (HTML page with
+   drag-link + clipboard-copy button so the user can install the
+   bookmarklet without copying ~1.5 KB of escaped JavaScript out of a
+   Markdown code block), and the services.
 2. ``async_setup_entry`` (once per integration entry): restore the
    per-entry ``ReadingStore`` from disk, build the coordinator,
    forward to the sensor platform. On first setup (no contract yet
-   bound) we also publish the persistent notification that carries
-   the generated bookmarklet(s).
+   bound) we also publish the persistent notification that links to
+   the bookmarklet install page.
 
 Wizard, in plain words:
 
@@ -42,8 +46,10 @@ from homeassistant.helpers.typing import ConfigType
 from .bookmarklet import (
     build_bookmarklet,
     build_bookmarklet_source,
+    collect_alternate_urls,
     format_install_notification,
 )
+from .bookmarklet_view import CanalBookmarkletPageView
 from .const import CONF_HA_URL, CONF_NAME, CONF_TOKEN, DOMAIN
 from .coordinator import CanalCoordinator
 from .ingest import CanalIngestView
@@ -67,32 +73,6 @@ REFRESH_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
 SHOW_BOOKMARKLET_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-
-
-def _collect_alternate_urls(hass: HomeAssistant, primary_url: str) -> list[tuple[str, str]]:
-    """Return `[(label, url), ...]` for HA-configured URLs that differ from
-    the primary one baked into this entry's bookmarklet.
-
-    Looks at ``hass.config.internal_url`` and ``hass.config.external_url``;
-    labels them as LAN / externo based on which slot they live in. If a
-    value equals the primary (after trailing-slash normalisation) or is
-    empty, it's skipped.
-    """
-    normalised_primary = (primary_url or "").rstrip("/")
-    seen = {normalised_primary}
-    out: list[tuple[str, str]] = []
-
-    internal = (hass.config.internal_url or "").rstrip("/")
-    external = (hass.config.external_url or "").rstrip("/")
-
-    if internal and internal not in seen:
-        out.append(("Uso en LAN (desde tu WiFi de casa)", internal))
-        seen.add(internal)
-    if external and external not in seen:
-        out.append(("Uso externo (desde fuera de casa)", external))
-        seen.add(external)
-
-    return out
 
 
 async def _publish_bookmarklet_notification(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -120,7 +100,7 @@ async def _publish_bookmarklet_notification(hass: HomeAssistant, entry: ConfigEn
     )
 
     alternates: list[tuple[str, str, str]] = []
-    for label, alt_url in _collect_alternate_urls(hass, ha_url):
+    for label, alt_url in collect_alternate_urls(hass, ha_url):
         alt_bm = build_bookmarklet(
             ha_url=alt_url,
             entry_id=entry.entry_id,
@@ -150,9 +130,13 @@ async def _publish_bookmarklet_notification(hass: HomeAssistant, entry: ConfigEn
 
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
-    """Register the HTTP view + the manual refresh service exactly once."""
+    """Register the HTTP views + the manual refresh service exactly once."""
     hass.data.setdefault(DOMAIN, {})
     hass.http.register_view(CanalIngestView(hass))
+    # Human-facing install page with drag-link + clipboard-copy button.
+    # Linked from the install notification; no auth surface added (uses
+    # HA's existing session cookie via ``requires_auth = True``).
+    hass.http.register_view(CanalBookmarkletPageView(hass))
 
     if not hass.services.has_service(DOMAIN, SERVICE_REFRESH):
 

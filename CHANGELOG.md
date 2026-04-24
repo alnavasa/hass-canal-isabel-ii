@@ -3,6 +3,60 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.4.8] — 2026-04-25
+
+### Añadido
+
+- **Página HTML de instalación del bookmarklet** con botón *Copiar* y
+  enlace arrastrable. Endpoint nuevo:
+  `GET /api/canal_isabel_ii/bookmarklet/<entry_id>` (autenticado con la
+  cookie de sesión de Home Assistant — la abres pulsando el link de la
+  notificación, sin tokens en la URL).
+
+  Resuelve el dolor real de copiar ~1.5 KB de JavaScript URL-encoded
+  desde un bloque de código Markdown, especialmente en iOS Safari
+  (long-press, arrastrar marcadores de selección a través de cientos
+  de caracteres escapados, dedos cruzados — y lo más típico es que el
+  user lo deje a medias). La página ofrece dos formas de instalación:
+
+  - **★ Canal → HA** — un enlace estilo botón que se arrastra
+    directamente a la barra de favoritos en escritorio. Click suelto
+    está bloqueado con `preventDefault()` + alert (ejecutarlo en HA
+    no tiene sentido — no hay sesión del Canal allí).
+  - **📋 Copiar bookmarklet** — botón que llama a
+    `navigator.clipboard.writeText()`. Un solo toque, funciona en iOS
+    Safari, Chrome móvil/escritorio y Firefox.
+
+  Si tu HA tiene `internal_url` y `external_url` configuradas, la
+  página renderiza una sección por cada variante (LAN + externo)
+  con sus propios botones de copiar / arrastrar.
+
+  Adicionalmente: `<details>` colapsables con el código fuente
+  legible (sin minificar) y los datos técnicos (URL, entry id,
+  token, endpoint ingest), un aviso resaltado sobre la regla
+  *un bookmarklet ↔ un contrato*, y soporte automático para tema
+  oscuro (`@media (prefers-color-scheme: dark)`).
+
+### Cambiado
+
+- **La notificación persistente de instalación es ahora corta** y
+  enlaza a la página HTML nueva. Se mantiene el bookmarklet en bruto
+  + el código fuente dentro de un bloque `<details>` colapsado como
+  fallback por si la página no abre. Las instrucciones detalladas
+  por navegador (Mac Safari / iOS Safari / Chrome / Firefox) se han
+  movido a la página HTML, que tiene mejor UX para presentarlas.
+
+### Notas
+
+- **Acordaos de regenerar el bookmarklet tras update**: la URL
+  `javascript:…` guardada en favoritos NO se actualiza sola al
+  actualizar la integración. *Ajustes → Herramientas para
+  desarrolladores → Acciones → `canal_isabel_ii.show_bookmarklet`*
+  para reaparecer la notificación, pulsa el link de la página, y
+  reemplaza la URL del favorito. (En v0.4.8 ningún cambio del JS
+  del bookmarklet en sí — esto es solo si quieres aprovechar la
+  página nueva para reinstalarlo más cómodamente.)
+
 ## [0.4.7] — 2026-04-24
 
 ### Arreglado

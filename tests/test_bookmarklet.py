@@ -266,7 +266,12 @@ class TestFormatInstallNotification:
         assert bm in msg
         assert "```" in msg
 
-    def test_mentions_safari_and_chrome(self):
+    def test_mentions_ios_safari_for_copy_button_context(self):
+        # v0.4.8+: the notification body is short and links to the
+        # bookmarklet install page. The detailed browser-by-browser
+        # install instructions live on the page now. The notification
+        # only needs to flag iOS Safari (where the copy button matters
+        # most — that browser has no bookmarks bar to drag onto).
         bm = build_bookmarklet(
             ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
         )
@@ -281,9 +286,27 @@ class TestFormatInstallNotification:
             token=TOKEN,
             source=src,
         )
-        assert "Safari" in msg
-        assert "Chrome" in msg
-        assert "iOS" in msg
+        assert "iOS Safari" in msg
+
+    def test_links_to_install_page(self):
+        # The notification's primary affordance is the link to the
+        # install page — pin its presence so a future change can't
+        # silently regress to an inline-only flow.
+        bm = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        src = build_bookmarklet_source(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        msg = format_install_notification(
+            install=INSTALL,
+            bookmarklet=bm,
+            ha_url=HA_URL,
+            entry_id=ENTRY,
+            token=TOKEN,
+            source=src,
+        )
+        assert f"/api/canal_isabel_ii/bookmarklet/{ENTRY}" in msg
 
     def test_mentions_contract_segregation_warning(self):
         bm = build_bookmarklet(

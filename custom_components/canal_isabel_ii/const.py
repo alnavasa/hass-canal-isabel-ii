@@ -63,6 +63,12 @@ STATISTICS_SOURCE = DOMAIN
 #: authentication is the Bearer token in the header.
 INGEST_URL_PREFIX = "/api/canal_isabel_ii/ingest"
 
+#: URL prefix for the human-facing bookmarklet install page (HTML with a
+#: drag-to-bookmarks-bar link + a "copy to clipboard" button). Authenticated
+#: with HA's normal session cookie; the user reaches it from a link in the
+#: install notification.
+BOOKMARKLET_PAGE_URL_PREFIX = "/api/canal_isabel_ii/bookmarklet"
+
 #: Maximum POST body size accepted by the ingest endpoint. The
 #: portal CSV for one full year of one contract is < 200 KB; we set a
 #: 4 MB ceiling so a malformed bookmarklet that ships an entire

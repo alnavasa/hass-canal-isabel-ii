@@ -35,9 +35,13 @@ resulting string and drags it into their bookmarks bar.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from .const import INGEST_URL_PREFIX
+from .const import BOOKMARKLET_PAGE_URL_PREFIX, INGEST_URL_PREFIX
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 #: Readable bookmarklet body (kept indented for diffability). Placeholders
 #: ``__HA_URL__`` ``__ENTRY_ID__`` ``__TOKEN__`` ``__INSTALL__`` are
@@ -227,6 +231,45 @@ def _js_string_safe(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
+def collect_alternate_urls(hass: HomeAssistant, primary_url: str) -> list[tuple[str, str]]:
+    """Return ``[(label, url), ...]`` for HA-configured URLs that differ from
+    the primary one baked into this entry's bookmarklet.
+
+    Looks at ``hass.config.internal_url`` and ``hass.config.external_url``;
+    labels them as LAN / externo based on which slot they live in. If a
+    value equals the primary (after trailing-slash normalisation) or is
+    empty, it's skipped.
+
+    Exposed at module level (not inside ``__init__``) so both the
+    notification publisher and the HTML-page view can render the same set
+    of variants without a circular import.
+    """
+    normalised_primary = (primary_url or "").rstrip("/")
+    seen = {normalised_primary}
+    out: list[tuple[str, str]] = []
+
+    internal = (hass.config.internal_url or "").rstrip("/")
+    external = (hass.config.external_url or "").rstrip("/")
+
+    if internal and internal not in seen:
+        out.append(("Uso en LAN (desde tu WiFi de casa)", internal))
+        seen.add(internal)
+    if external and external not in seen:
+        out.append(("Uso externo (desde fuera de casa)", external))
+        seen.add(external)
+
+    return out
+
+
+def bookmarklet_page_url(entry_id: str) -> str:
+    """Return the relative URL to the per-entry bookmarklet install page.
+
+    The page is served by the integration's
+    :class:`CanalBookmarkletPageView` and carries the drag-to-bookmark
+    link + the copy-to-clipboard button."""
+    return f"{BOOKMARKLET_PAGE_URL_PREFIX}/{entry_id}"
+
+
 def format_install_notification(
     *,
     install: str,
@@ -240,80 +283,65 @@ def format_install_notification(
     """Render the persistent-notification body shown right after
     install (and re-shown by the ``show_bookmarklet`` service).
 
-    ``alternates`` is an optional list of ``(label, url, bookmarklet)``
-    tuples for additional HA URLs (e.g. a LAN ``internal_url`` when the
-    primary is a public ``external_url``). Each alternate is rendered
-    as its own copy-ready code block so the user can pick the one that
-    matches where they'll click the favorite from. All alternates
-    share the same ``entry_id`` + ``token`` — any of them hits the
-    same integration entry.
+    The notification is short on purpose: the awful UX of copying a
+    ``javascript:…`` URL out of a Markdown code block (especially on iOS
+    Safari, where dragging selection markers across hundreds of escaped
+    characters is a misery) is now handled by a dedicated HTML page
+    served by :class:`CanalBookmarkletPageView`. The page has a
+    drag-to-bookmarks-bar link AND a one-tap copy-to-clipboard button.
+
+    The notification just points at that page. We keep the raw
+    bookmarklet inside a collapsed ``<details>`` block as a fallback
+    in case the page can't be opened (extreme HA misconfiguration).
+
+    ``alternates`` (LAN/external variants) is rendered into the page
+    too — the notification doesn't need to enumerate them itself.
 
     Markdown-friendly so the persistent_notification card renders the
-    code blocks correctly. Keeps the full minified bookmarklet
-    inline — current size (~1.5 KB) is well under HA's notification
-    truncation threshold.
+    bullets, the bold install button, and the collapsible block
+    correctly.
     """
-    alt_blocks = ""
+    page_url = bookmarklet_page_url(entry_id)
+    alternates_hint = ""
     if alternates:
-        alt_blocks += (
-            "\n### Variantes adicionales (copia la que te convenga)\n\n"
-            "El `entry_id` y el token son los mismos — lo único que cambia "
-            "es a qué URL de tu HA apunta el POST. Instala **uno** (el que "
-            "uses más) o **los dos** con nombres distintos (p.ej. "
-            "*Canal → HA (LAN)* y *Canal → HA (externo)*).\n\n"
-        )
-        for label, alt_url, alt_bm in alternates:
-            alt_blocks += f"**{label}** — apunta a `{alt_url}`\n\n```\n{alt_bm}\n```\n\n"
+        labels = ", ".join(label for label, _url, _bm in alternates)
+        alternates_hint = f"\n_La página incluye variantes adicionales para tus URLs: {labels}._\n"
 
     return (
-        f"## Integración creada — {install}\n\n"
-        "### Paso 1 · Crea un favorito en tu navegador\n"
-        "**Mac Safari**: Marcadores → *Añadir marcador…* → guarda esta página "
-        "(cualquier página vale temporalmente). Luego edita ese marcador y "
-        "pega lo siguiente en el campo URL:\n\n"
-        f"```\n{bookmarklet}\n```\n\n"
-        "**iOS Safari**: pulsa el botón **Compartir** (cuadrado con flecha) → "
-        "*Añadir marcador*. Luego ve a Marcadores → *Editar*, abre ese marcador "
-        "y reemplaza la URL con el bloque de arriba (mantén pulsado para pegar).\n\n"
-        "**Chrome / Firefox**: arrastra cualquier favorito existente a la barra, "
-        "haz click derecho → *Editar*, y pega el bloque de arriba en la URL.\n"
-        f"{alt_blocks}"
-        "### Paso 2 · Úsalo\n"
-        "1. Abre <https://oficinavirtual.canaldeisabelsegunda.es> e inicia sesión "
-        "como siempre (DNI + contraseña + captcha si aparece).\n"
-        "2. Asegúrate de que el dropdown de contrato (arriba a la derecha) "
-        "muestra el contrato que quieres importar a esta integración.\n"
-        "3. *(Opcional, para histórico)* Si quieres importar un mes concreto del "
-        "pasado, entra en **Mi consumo**, filtra el rango de fechas deseado "
-        "(p.ej. del 1 al 31 de enero) con frecuencia **Horaria**, y pulsa "
-        "**Ver** para que la tabla se actualice. El bookmarklet leerá tu "
-        "selección actual.\n"
-        "4. Pulsa el favorito que acabas de crear.\n"
-        '5. Verás un alert con el resumen: "Canal -> HA - Contrato: ..., '
-        'Lecturas importadas: ...".\n'
-        "6. Vuelve a HA y verás los sensores creados en *Ajustes -> "
-        "Dispositivos y servicios -> Canal de Isabel II*.\n\n"
-        "### Datos técnicos (por si se te pierde el bookmarklet)\n"
+        f"## Bookmarklet listo — {install}\n\n"
+        "Tu bookmarklet ya está generado. La forma más cómoda de instalarlo es "
+        "desde la página HTML que la integración acaba de exponer:\n\n"
+        f"### → [📥 Abrir página de instalación]({page_url})\n\n"
+        "En esa página tienes:\n"
+        "- un botón **📋 Copiar bookmarklet** (un solo toque, "
+        "funciona en iOS Safari);\n"
+        "- un enlace **★ Canal → HA** que arrastras a la barra de favoritos "
+        "en escritorio;\n"
+        "- el código fuente legible y los datos técnicos."
+        f"{alternates_hint}\n"
+        "### Una vez instalado el favorito\n"
+        "1. Abre <https://oficinavirtual.canaldeisabelsegunda.es> e inicia "
+        "sesión (DNI + contraseña + captcha si aparece).\n"
+        "2. Asegúrate de que el dropdown de contrato muestra el correcto.\n"
+        "3. *(Opcional)* Para importar un mes histórico, en **Mi consumo** "
+        "filtra ese rango con frecuencia **Horaria** y pulsa **Ver** antes "
+        "de pulsar el favorito.\n"
+        "4. Pulsa el favorito → verás un alert con el resumen.\n\n"
+        "⚠️ **Un bookmarklet ↔ un contrato.** Si tienes varios contratos en "
+        "el portal, añade *otra integración* Canal de Isabel II por cada uno "
+        "(no mezcles bookmarklets — el endpoint rechazará el segundo "
+        "contrato con HTTP 409).\n\n"
+        "<details><summary>Si la página no abre — bookmarklet en bruto</summary>\n\n"
+        "Datos técnicos:\n\n"
         f"- **URL HA**: `{ha_url}`\n"
         f"- **Entry ID**: `{entry_id}`\n"
         f"- **Token**: `{token}`\n"
-        f"- **Endpoint**: `{ha_url}/api/canal_isabel_ii/ingest/{entry_id}`\n\n"
-        "<details><summary>Código JavaScript legible (sin minificar)</summary>\n\n"
+        f"- **Endpoint ingest**: `{ha_url}/api/canal_isabel_ii/ingest/{entry_id}`\n\n"
+        "Bookmarklet minificado (cópialo y pégalo en la URL de un favorito):\n\n"
+        f"```\n{bookmarklet}\n```\n\n"
+        "Código fuente legible:\n\n"
         "```javascript\n"
         f"{source}\n"
         "```\n"
-        "</details>\n\n"
-        "### Cuándo pulsar el bookmarklet\n"
-        "- **Setup inicial**: ahora mismo, para importar los últimos 60 días (el "
-        "rango por defecto de la Oficina Virtual).\n"
-        "- **Histórico de meses anteriores**: filtra el rango que quieras en la "
-        "Oficina Virtual (p.ej. enero entero), pulsa **Ver** para aplicar el "
-        "filtro, y luego pulsa el favorito. La integración detecta los días "
-        "nuevos y los mete en las estadísticas horarias retroactivamente — "
-        "aparecerán en el panel Energía → Agua.\n"
-        "- **Mantenimiento**: 1-2 veces por semana es suficiente. La integración "
-        "hace upsert idempotente, no duplica datos.\n"
-        "- **Mismo contrato siempre**: este bookmarklet está vinculado al "
-        "contrato que selecciones en la primera pulsación. Si tienes varios "
-        "contratos, añade otra integración Canal de Isabel II para cada uno."
+        "</details>"
     )
