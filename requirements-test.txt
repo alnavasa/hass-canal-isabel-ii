@@ -1,2 +1,6 @@
 pytest>=8.0
 ruff>=0.6
+# Required by tests/test_services_yaml.py to load services.yaml. Same
+# YAML library Home Assistant itself uses, so no risk of parser drift
+# between what the test sees and what HA loads at runtime.
+pyyaml>=6.0

@@ -3,6 +3,55 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.17] — 2026-04-26
+
+### Añadido
+
+- **Test de regresión `tests/test_services_yaml.py`** que verifica
+  que `custom_components/canal_isabel_ii/services.yaml` y la
+  registración real de servicios en `__init__.py` están
+  sincronizadas. Cubre cuatro modos de fallo silenciosos que ningún
+  otro test ni `ruff` detectan:
+
+  1. Servicio registrado en código pero ausente del YAML — el
+     usuario no lo ve en *Herramientas para desarrolladores →
+     Acciones* y no puede invocarlo desde la UI.
+  2. Servicio en el YAML pero no registrado en código — HA emite
+     `service <name> for domain canal_isabel_ii not found` cada
+     arranque y el botón en la UI da `Failed to call service`.
+  3. Campo declarado en el YAML pero no en el `vol.Schema(...)`
+     — el handler ignora silenciosamente lo que el usuario teclea.
+  4. Campo en el `vol.Schema(...)` pero no en el YAML — el
+     handler lo lee pero la UI no lo ofrece como input.
+
+  El test es **AST + `yaml.safe_load`**, sin dependencia de Home
+  Assistant: parsea el AST de `__init__.py` para encontrar las
+  llamadas a `hass.services.async_register(DOMAIN, SERVICE_X, …,
+  schema=X_SCHEMA)`, resuelve las constantes `SERVICE_X = "x"` y
+  el dict de `vol.Schema({vol.Optional(ATTR_INSTANCE): ...})` y
+  compara contra los servicios + campos declarados en
+  `services.yaml`.
+
+  Si en el futuro alguien añade un servicio nuevo o renombra un
+  campo, el test falla con un mensaje que apunta directo al
+  fichero y al identificador a corregir. Si la forma del
+  `vol.Schema` se sale del patrón conocido (por ejemplo nuevos
+  validadores compuestos), el test también falla — alto y claro
+  — para forzar al desarrollador a extender el parser en vez de
+  silenciar la regresión.
+
+- `requirements-test.txt` añade `pyyaml>=6.0` (dependencia del
+  nuevo test). Es la misma librería YAML que usa Home Assistant
+  internamente, así que no hay riesgo de divergencia entre lo que
+  el test ve y lo que HA carga en runtime.
+
+### Verificación
+
+Los cuatro servicios actualmente registrados pasan el nuevo guard:
+`refresh`, `show_bookmarklet`, `clear_cost_stats` (v0.5.15) y
+`reset_meter` (v0.5.16) — todos con su entrada en YAML, descripción,
+campo `instance` opcional y selector `text:` consistente.
+
 ## [0.5.16] — 2026-04-26
 
 ### Añadido
