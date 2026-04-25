@@ -3,6 +3,34 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.5] — 2026-04-25
+
+### Arreglado
+
+- **HA escupía warnings al log** sobre dos sensores de coste con
+  combinaciones `device_class` + `state_class` que HA endureció en
+  versiones recientes:
+  - `Coste acumulado`: era `monetary` + `total_increasing`. HA exige
+    para `monetary` que el state_class sea `total` (o `None`) — no
+    `total_increasing`, porque el dinero puede decrecer (devoluciones,
+    correcciones) y `total_increasing` lleva detección de reset
+    automática que no encaja con valores monetarios. Cambiado a
+    `total`. **No** publicamos `last_reset` así que HA trata la serie
+    como un acumulador puro, igual que antes.
+  - `Precio actual`: era `monetary` + `measurement`. La combinación es
+    inválida por la misma razón. Pero además semánticamente `monetary`
+    es para *cantidades de dinero*, y este sensor reporta una *tasa*
+    (€/m³). Eliminado el `device_class`, manteniendo `measurement`
+    (que es lo correcto para una medida instantánea). El icono
+    `mdi:cash-clock` y la unidad `EUR/m³` siguen exactamente igual.
+
+  Estos warnings aparecían en *Ajustes → Sistema → Registros* a la hora
+  de arrancar HA con la integración actualizada. No afectaban
+  funcionalmente al panel de Energía (que sigue funcionando con la
+  estadística externa `canal_isabel_ii:cost_<contract>` que no
+  depende del state_class del sensor), pero ensuciaban el log y
+  podrían terminar siendo un error duro en versiones futuras de HA.
+
 ## [0.5.4] — 2026-04-25
 
 ### Arreglado

@@ -695,16 +695,23 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
     - groups the cached readings by calendar bimonth,
     - prices each one against the right vigencia,
     - distributes cuota fija evenly across the period's hours,
-    - emits a monotone cumulative-€ stream suitable for
-      ``state_class=total_increasing``.
+    - emits a monotone cumulative-€ stream.
 
     The state value (``native_value``) is the most recent
     ``cumulative_eur`` from that stream — i.e. "total € spent so far",
     matching what HA shows on the entity card.
+
+    State class is ``TOTAL`` rather than ``TOTAL_INCREASING``: HA's
+    monetary device class strictly disallows ``TOTAL_INCREASING``
+    (a monotone-increasing money value with auto-reset detection
+    doesn't model real-world money — refunds / corrections can
+    decrease it). ``TOTAL`` is the compliant choice for cumulative
+    monetary values; we never publish ``last_reset`` so HA treats
+    the series as a pure accumulator, which is what we want.
     """
 
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:cash"
     _attr_translation_key = "cumulative_cost"
     _attr_suggested_display_precision = 2
@@ -1029,9 +1036,17 @@ class CanalCurrentPriceSensor(_ContractSensor, _CostSensorMixin):
     within a bimonth, which is why this sensor is stateless w.r.t.
     history — it always reflects the price for the *next* m³ given
     the cache's current bimonth-to-date total.
+
+    No ``device_class`` here even though the unit involves currency:
+    HA's monetary device class is for *amounts of money* (with strict
+    state-class compatibility — ``TOTAL`` only). This sensor reports a
+    *rate* (€/m³), not an amount, so MONETARY would mis-describe the
+    semantics and force a state class incompatible with the
+    instantaneous-measurement nature of the value. Leaving
+    ``device_class`` unset keeps the unit string visible (`EUR/m³`)
+    and lets us use ``MEASUREMENT`` honestly.
     """
 
-    _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:cash-clock"
     _attr_translation_key = "current_price"
