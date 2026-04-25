@@ -355,7 +355,12 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         rows = self._sorted_rows()
         if not rows:
             return self._restored_value
-        computed = sum(r.liters for r in rows)
+        # Add the per-contract baseline of liters already trimmed out
+        # of the cache so the total stays monotonic across cache rolls.
+        # ``coordinator.baseline_liters`` is empty for fresh installs
+        # and only grows when the cache crosses ``MAX_READINGS_PER_ENTRY``.
+        baseline = self.coordinator.baseline_liters.get(self._contract_id, 0.0)
+        computed = baseline + sum(r.liters for r in rows)
         if self._restored_value is not None and computed < self._restored_value - 0.5:
             _LOGGER.warning(
                 "Cumulative dropped (%.1f → %.1f L) — likely cache wipe; "
@@ -371,6 +376,12 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = self._common_attributes()
         attrs["readings_count"] = len(self._sorted_rows())
+        # Surface the baseline so operators can see at a glance whether
+        # the cumulative state is partially synthetic (i.e. cache has
+        # already rolled over at least once).
+        baseline = self.coordinator.baseline_liters.get(self._contract_id, 0.0)
+        if baseline > 0:
+            attrs["trimmed_baseline_l"] = round(baseline, 3)
         return attrs
 
     def _handle_coordinator_update(self) -> None:

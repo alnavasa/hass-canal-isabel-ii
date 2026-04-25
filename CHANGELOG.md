@@ -3,6 +3,52 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.12] — 2026-04-26
+
+### Arreglado
+
+- **El sensor `Consumo periodo` ya no se congela cuando la caché
+  alcanza su tope.** `ReadingStore` recorta las lecturas más antiguas
+  cuando el número total supera `MAX_READINGS_PER_ENTRY` (8760, ~1
+  año de hourly). Hasta ahora, ese recorte hacía que el `native_value`
+  acumulado del sensor `Consumo periodo` cayera por debajo de su
+  valor monotónico previamente restaurado, activando el *guard*
+  ``computed < restored - 0.5`` que congelaba el valor hasta que las
+  nuevas lecturas volvieran a superar el máximo histórico — meses, en
+  el peor caso.
+
+  Solución: `ReadingStore` mantiene un baseline acumulado por contrato
+  (`baseline_liters`). Cada vez que se recorta una lectura, sus litros
+  se suman al baseline del contrato correspondiente **antes** del
+  borrado. El sensor calcula
+  `native_value = baseline_liters[contract] + sum(lecturas en caché)`,
+  preservando la monotonía a través de cada *roll* de la caché. El
+  baseline persiste en disco junto al resto del *store*. Si el baseline
+  es no-cero, se expone en el atributo `trimmed_baseline_l` de la
+  entidad para visibilidad operativa.
+
+  Las estadísticas de largo plazo (recorder) **no estaban afectadas**:
+  `_push_statistics` se anclaba siempre al `last_sum` del recorder,
+  no al sum local. El panel Energía siempre vio los valores correctos.
+  Esta release solo arregla el valor mostrado en la card de la entidad.
+
+### Compatibilidad
+
+- *Stores* anteriores a v0.5.12 no tienen el campo `baseline_liters`
+  en su JSON; el cargador tolera su ausencia y arranca con baseline
+  vacío. Para usuarios cuya caché ya hubiera recortado bajo el código
+  antiguo, el siguiente recorte rellena el baseline desde ese punto;
+  los litros perdidos en aquel recorte siguen reflejados en las
+  estadísticas del recorder, así que no hay pérdida de datos en el
+  panel Energía — solo el `native_value` puede tardar unas horas en
+  re-cruzar su máximo monotónico anterior.
+
+### Tests
+
+- Nuevo `tests/test_store_baseline.py` con 4 tests: acumulación durante
+  el trim, separación por contrato (entries multi-contrato), *roundtrip*
+  por serialización, y tolerancia a *stores* pre-v0.5.12 sin el campo.
+
 ## [0.5.11] — 2026-04-25
 
 ### Arreglado

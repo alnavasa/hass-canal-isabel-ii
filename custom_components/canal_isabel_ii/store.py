@@ -58,6 +58,18 @@ class ReadingStore:
         self._readings: dict[tuple[str, datetime], Reading] = {}
         self._meter_summary: MeterSummary | None = None
         self._last_ingest_at: datetime | None = None
+        # Per-contract cumulative liters of readings that have already
+        # been trimmed out of ``self._readings`` to keep the cache under
+        # ``MAX_READINGS_PER_ENTRY``. Without this carry-over, the
+        # cumulative-consumption sensor would freeze the moment trim
+        # kicks in: the recomputed sum drops below the previously
+        # restored monotonic value, the ``computed < restored - 0.5``
+        # guard in ``CanalCumulativeConsumptionSensor.native_value``
+        # latches the old value, and only after months of new readings
+        # would the sum naturally re-cross it. With the baseline,
+        # ``native_value = baseline_liters[contract] + sum(rows)`` stays
+        # monotonic across every trim. Persisted in ``_serialise``.
+        self._baseline_liters: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -80,12 +92,31 @@ class ReadingStore:
                 self._last_ingest_at = datetime.fromisoformat(str(last))
             except (TypeError, ValueError):
                 self._last_ingest_at = None
+        # Pre-v0.5.12 stores don't have ``baseline_liters`` — default to
+        # an empty dict (==no trim has happened yet). For users whose
+        # cache HAS already been trimmed under the old code, the next
+        # trim event repopulates the baseline from that point forward;
+        # the historical liters lost to the old trim are reflected in
+        # the recorder's long-term stats anyway, so the Energy panel
+        # is unaffected — only the entity-card cumulative state value
+        # may need a few hours/days of new data to re-cross its
+        # previous monotonic high. Acceptable degradation for the
+        # single-time migration; we don't try to back-compute a
+        # baseline from the recorder.
+        raw_baseline = data.get("baseline_liters") or {}
+        if isinstance(raw_baseline, dict):
+            for contract_id, liters in raw_baseline.items():
+                try:
+                    self._baseline_liters[str(contract_id)] = float(liters)
+                except (TypeError, ValueError):
+                    continue
         _LOGGER.debug(
-            "[%s] Store loaded: %d readings, meter=%s, last_ingest=%s",
+            "[%s] Store loaded: %d readings, meter=%s, last_ingest=%s, baseline=%s",
             self._entry_id,
             len(self._readings),
             self._meter_summary,
             self._last_ingest_at,
+            self._baseline_liters,
         )
 
     async def async_save(self) -> None:
@@ -111,6 +142,17 @@ class ReadingStore:
     @property
     def contracts(self) -> set[str]:
         return {r.contract for r in self._readings.values() if r.contract}
+
+    @property
+    def baseline_liters(self) -> dict[str, float]:
+        """Per-contract sum of liters already trimmed out of the cache.
+
+        The cumulative-consumption sensor adds this to its running sum
+        of the in-cache rows so the entity state stays monotonic across
+        a trim. Returns a copy so callers can't mutate the internal
+        dict by reference.
+        """
+        return dict(self._baseline_liters)
 
     # ------------------------------------------------------------------
     # Mutations (ingest endpoint only)
@@ -150,10 +192,22 @@ class ReadingStore:
         # Trim oldest if over the cap. We sort the keys by timestamp,
         # not by (contract, timestamp), so multi-contract entries
         # don't have one contract starve the other.
+        #
+        # As we drop each row, accumulate its liters into the
+        # per-contract baseline so the cumulative-consumption sensor
+        # can keep its monotonic state across the trim. Without this
+        # carry-over the sensor would freeze (see the long comment in
+        # ``__init__`` next to ``self._baseline_liters``).
         if len(self._readings) > MAX_READINGS_PER_ENTRY:
             sorted_keys = sorted(self._readings.keys(), key=lambda k: k[1])
             excess = len(self._readings) - MAX_READINGS_PER_ENTRY
             for k in sorted_keys[:excess]:
+                trimmed = self._readings[k]
+                if trimmed.contract:
+                    self._baseline_liters[trimmed.contract] = (
+                        self._baseline_liters.get(trimmed.contract, 0.0)
+                        + trimmed.liters
+                    )
                 del self._readings[k]
 
         if meter_summary is not None:
@@ -167,6 +221,7 @@ class ReadingStore:
         self._readings.clear()
         self._meter_summary = None
         self._last_ingest_at = None
+        self._baseline_liters.clear()
         await self._store.async_remove()
 
     # ------------------------------------------------------------------
@@ -177,6 +232,12 @@ class ReadingStore:
             "readings": [_reading_to_dict(r) for r in self.readings],
             "meter_summary": _meter_summary_to_dict(self._meter_summary),
             "last_ingest_at": (self._last_ingest_at.isoformat() if self._last_ingest_at else None),
+            # Per-contract sum of liters already trimmed out of
+            # ``self._readings``. Required for the cumulative
+            # consumption sensor to stay monotonic across cache trims.
+            # Pre-v0.5.12 stores didn't have this field; the loader
+            # tolerates its absence.
+            "baseline_liters": dict(self._baseline_liters),
         }
 
 

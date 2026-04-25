@@ -49,6 +49,16 @@ class CanalCoordinator(DataUpdateCoordinator[list[Reading]]):
         """Latest meter summary from the store (may be None on first boot)."""
         return self.store.meter_summary
 
+    @property
+    def baseline_liters(self) -> dict[str, float]:
+        """Per-contract liters already trimmed out of the cache.
+
+        Forwarded from the store so sensors can keep their cumulative
+        state monotonic when the cache rolls over its size cap. See
+        ``ReadingStore`` for the full rationale.
+        """
+        return self.store.baseline_liters
+
     async def _async_update_data(self) -> list[Reading]:
         # No I/O — just surface whatever the store currently holds.
         # The store is the single source of truth; the ingest endpoint
