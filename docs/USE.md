@@ -92,10 +92,25 @@ agua. Tres opciones:
 
 ### Histórico el día 1
 
-El **primer click del bookmarklet** descarga el CSV horario completo
-que el portal te sirva (~7 meses retroactivos). Es decir: ya en el
-primer POST tienes todo el histórico disponible, no hace falta esperar
-varios días para que el panel se pueble.
+El **primer click del bookmarklet**, sin filtro de pantalla,
+descarga el rango por defecto del portal (últimos ~60 días horarios).
+Para tirar de los **~7 meses** completos que el portal retiene, **filtra
+en pantalla por tramos de ≤30 días** y pulsa el favorito una vez por
+tramo:
+
+1. En *Mi consumo*, fija frecuencia **Horaria** + rango de fechas
+   ≤30 días (p.ej. `1-30 ene`).
+2. Pulsa **Ver** para que el portal cargue ese tramo.
+3. Pulsa el bookmarklet — POSTea las horas filtradas.
+4. Cambia el rango (p.ej. `31 ene-1 mar`), **Ver**, bookmarklet otra
+   vez. Repite hasta cubrir lo que quieras.
+
+Las estadísticas externas son **upsert por timestamp horario**, así que
+los tramos se **acumulan, no se sobrescriben**, sin riesgo de duplicar.
+
+> **Por qué 30 días**: el portal rechaza rangos mayores con error en el
+> formulario `consumoForm`. No es una limitación del bookmarklet —
+> simplemente respetamos lo que el backend del Canal sirve.
 
 Para mantenerlo fresco basta con pulsar el bookmarklet 1-2 veces por
 semana: el POST es upsert-seguro, no duplica datos.
@@ -371,6 +386,14 @@ Deberías ver al menos un `('canal_isabel_ii:consumption_<id>', 'Casa - Canal de
   rango, ni con backfill. Para histórico largo, tendrás que hacer
   *snapshot* del recorder periódicamente (es lo que hace `recorder` por
   defecto, pero conviene revisar `purge_keep_days`).
+- **Rango máx. por click: 30 días**: el formulario `consumoForm` del
+  portal rechaza rangos de fechas mayores de 30 días naturales. El
+  bookmarklet POSTea exactamente lo que tengas filtrado en pantalla —
+  si pones 31 días, el portal te devuelve error y el bookmarklet
+  no recibe CSV. Para meter más historia, parte el rango en tramos
+  consecutivos de ≤30 días y pulsa el favorito una vez por tramo
+  (las estadísticas externas son upsert por timestamp horario, así
+  que se acumulan sin duplicar).
 - **Lectura absoluta diaria**: el sensor `Lectura del contador` se
   refresca **una vez al día** porque así lo expone el portal. No
   esperes verlo subir minuto a minuto.

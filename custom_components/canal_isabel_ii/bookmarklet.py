@@ -357,9 +357,11 @@ def format_install_notification(
         "1. Abre <https://oficinavirtual.canaldeisabelsegunda.es> e inicia "
         "sesión (DNI + contraseña + captcha si aparece).\n"
         "2. Asegúrate de que el dropdown de contrato muestra el correcto.\n"
-        "3. *(Opcional)* Para importar un mes histórico, en **Mi consumo** "
-        "filtra ese rango con frecuencia **Horaria** y pulsa **Ver** antes "
-        "de pulsar el favorito.\n"
+        "3. *(Opcional, histórico)* En **Mi consumo** filtra el rango que "
+        "quieras con frecuencia **Horaria** y pulsa **Ver** antes de pulsar "
+        "el favorito. **Máximo 30 días por click** — el portal rechaza "
+        "rangos mayores. Para meter más historia, repite con tramos de ≤30 "
+        "días (los datos se acumulan, no se sobrescriben).\n"
         "4. Pulsa el favorito → verás un alert con el resumen.\n\n"
         "⚠️ **Un bookmarklet ↔ un contrato.** Si tienes varios contratos en "
         "el portal, añade *otra integración* Canal de Isabel II por cada uno "
@@ -621,7 +623,7 @@ __VARIANTS__
   <ol>
     <li>Abre <a href="https://oficinavirtual.canaldeisabelsegunda.es" target="_blank" rel="noopener">oficinavirtual.canaldeisabelsegunda.es</a> e inicia sesión.</li>
     <li>Asegúrate de que el dropdown de contrato muestra el correcto.</li>
-    <li><em>Opcional (histórico)</em>: en <strong>Mi consumo</strong>, filtra el rango de fechas que quieras (p.ej. enero entero) con frecuencia <strong>Horaria</strong> y pulsa <strong>Ver</strong>.</li>
+    <li><em>Opcional (histórico)</em>: en <strong>Mi consumo</strong>, filtra el rango de fechas que quieras con frecuencia <strong>Horaria</strong> y pulsa <strong>Ver</strong>. <strong>Máximo 30 días por click</strong> — el portal rechaza rangos mayores. Para meter más historia, repite con tramos consecutivos de ≤30 días (los datos se acumulan, no se sobrescriben).</li>
     <li>Pulsa el favorito que acabas de crear.</li>
     <li>Verás un alert con el resumen («Lecturas importadas: …, Nuevas: …»).</li>
     <li>Vuelve a HA: los sensores y el panel <em>Energía → Agua</em> se rellenan solos.</li>

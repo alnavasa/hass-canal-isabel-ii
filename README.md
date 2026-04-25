@@ -115,6 +115,10 @@ Al pulsar el bookmarklet desde la página del portal:
 
 A partir de aquí, cada click vuelca lo que haya nuevo. Las estadísticas son **upsert-seguras** — pulsar 2 veces seguidas no duplica.
 
+> **Importar histórico (opcional)**: para meter datos antiguos (p.ej. enero entero), en **Mi consumo** del portal **filtra el rango con frecuencia Horaria** y pulsa **Ver** *antes* de pulsar el favorito. El bookmarklet lee el formulario tal cual está en pantalla, así que la fecha que veas se importa retroactivamente al panel de Energía → Agua.
+>
+> ⚠️ **Máximo 30 días por click** — el portal rechaza rangos mayores con error. Para meter más historia (varios meses), repite con **tramos consecutivos de ≤30 días** (p.ej. `1-30 ene`, `31 ene-1 mar`, …): los datos se **acumulan, no se sobrescriben** (las estadísticas externas son upsert por timestamp horario). El portal retiene ~7 meses; nada anterior se puede recuperar.
+
 > **Sesión de HA**: sólo necesitas estar logado en el **portal de Canal**
 > (DNI + contraseña). **No hace falta estar logado en Home Assistant** en ese
 > navegador — el bookmarklet lleva su propio Bearer token embebido y el

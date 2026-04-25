@@ -3,6 +3,37 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.4.11] — 2026-04-25
+
+### Documentación
+
+- **Aviso del límite de 30 días por click para import histórico**, en
+  los cuatro sitios donde se explica el flujo *filtrar en pantalla →
+  pulsar favorito*: la notificación persistente, la página HTML de
+  instalación, el README (§4) y `docs/USE.md` (sección «Histórico el
+  día 1» + Limitaciones conocidas). El formulario `consumoForm` del
+  portal rechaza rangos de fechas mayores de 30 días — si pones 31, el
+  portal devuelve error y el bookmarklet se queda sin CSV. Para meter
+  más historia (varios meses) se parte el rango en tramos consecutivos
+  de ≤30 días y se pulsa el favorito una vez por tramo. Las
+  estadísticas externas son upsert por timestamp horario, así que los
+  tramos se acumulan sin duplicar.
+- **Corregido detalle previo en USE.md**: la sección «Histórico el día
+  1» decía que el primer click descarga «~7 meses» retroactivos. Eso
+  no es exacto — sin filtro en pantalla, el portal sirve su rango por
+  defecto (~60 días). Para los ~7 meses completos hay que iterar con
+  tramos ≤30d como arriba.
+
+### Notas
+
+- **Sin cambios de código** en los sensores, el bookmarklet JS, ni el
+  endpoint de ingesta. Solo cambia el texto de la notificación, de la
+  página de instalación y de la documentación.
+- Tras update no es necesario regenerar el bookmarklet (no cambia
+  nada en el favorito). Si quieres ver la notificación con el aviso
+  nuevo: *Ajustes → Herramientas para desarrolladores → Acciones →
+  `canal_isabel_ii.show_bookmarklet`*.
+
 ## [0.4.10] — 2026-04-25
 
 ### Arreglado
