@@ -29,6 +29,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -50,6 +51,7 @@ from .const import (
     CONF_NAME,
     DEFAULT_NAME,
     DOMAIN,
+    SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
 from .coordinator import CanalCoordinator
@@ -349,7 +351,37 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
                 self._restored_value = float(last.native_value)
             except (TypeError, ValueError):
                 self._restored_value = None
+        # Subscribe to ``canal_isabel_ii.reset_meter`` (v0.5.16+). A
+        # physical counter swap drops the absolute meter reading to a
+        # small value; without this listener the monotonic guard
+        # (``computed < self._restored_value - 0.5``) below would
+        # latch the old value and freeze the entity for months until
+        # the new meter naturally re-crosses it.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_METER_RESET.format(entry_id=self._entry_id, contract_id=self._contract_id),
+                self._on_meter_reset,
+            )
+        )
         self._handle_coordinator_update()
+
+    def _on_meter_reset(self) -> None:
+        """Drop the monotonic-guard memory; force a state recompute.
+
+        Triggered by ``canal_isabel_ii.reset_meter``. The next call to
+        ``native_value`` will accept whatever the cache + (now-empty)
+        baseline produces, even if it is lower than what we last
+        published — that is the point of the service.
+        """
+        _LOGGER.info(
+            "[%s] Cumulative consumption: meter reset signal received "
+            "(was %.1f L); clearing monotonic guard",
+            self._contract_id,
+            self._restored_value or 0.0,
+        )
+        self._restored_value = None
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> float | None:
@@ -636,6 +668,29 @@ class CanalMeterReadingSensor(_ContractSensor, RestoreSensor):
                 self._restored_value = float(last.native_value)
             except (TypeError, ValueError):
                 self._restored_value = None
+        # Subscribe to ``canal_isabel_ii.reset_meter`` (v0.5.16+).
+        # Without this the monotonic guard in ``native_value`` would
+        # reject the new (smaller) physical reading after a counter
+        # swap and stick on the old m³ until the new meter eventually
+        # passes the previous high — could be years.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_METER_RESET.format(entry_id=self._entry_id, contract_id=self._contract_id),
+                self._on_meter_reset,
+            )
+        )
+
+    def _on_meter_reset(self) -> None:
+        """Clear the monotonic guard so the next reading is accepted."""
+        _LOGGER.info(
+            "[%s] Meter reading: meter reset signal received "
+            "(was %.3f m³); clearing monotonic guard",
+            self._contract_id,
+            self._restored_value or 0.0,
+        )
+        self._restored_value = None
+        self.async_write_ha_state()
 
     def _summary(self) -> MeterSummary | None:
         return self.coordinator.meter_summary
@@ -791,7 +846,32 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
                 self._restored_value = float(last.native_value)
             except (TypeError, ValueError):
                 self._restored_value = None
+        # Subscribe to ``canal_isabel_ii.reset_meter`` (v0.5.16+).
+        # The cost stream restarts from near-zero after a meter swap
+        # too; without this, the same monotonic guard that protects
+        # the consumption sensor would keep the entity card frozen on
+        # the pre-swap total. Long-term cost statistics are NOT
+        # touched — the recorder series anchors to its own ``last_sum``
+        # and continues forward across the swap.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_METER_RESET.format(entry_id=self._entry_id, contract_id=self._contract_id),
+                self._on_meter_reset,
+            )
+        )
         self._handle_coordinator_update()
+
+    def _on_meter_reset(self) -> None:
+        """Clear the cumulative-cost monotonic guard."""
+        _LOGGER.info(
+            "[%s] Cumulative cost: meter reset signal received "
+            "(was %.2f); clearing monotonic guard",
+            self._contract_id,
+            self._restored_value or 0.0,
+        )
+        self._restored_value = None
+        self.async_write_ha_state()
 
     def _cost_stream(self) -> list:
         """Compute the full cost stream for this contract from the cache.

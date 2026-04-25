@@ -47,3 +47,21 @@ clear_cost_stats:
       example: Casa principal
       selector:
         text:
+
+reset_meter:
+  name: Reset meter
+  description: >
+    Tell the integration that the physical water meter has been
+    replaced. Clears the per-contract trim baseline and the in-memory
+    monotonic guard on the cumulative-consumption, cumulative-cost
+    and absolute-meter-reading sensors so the next (lower) reading
+    from the new counter is accepted as-is. Long-term statistics for
+    the Energy panel are NOT touched — those continue forward from
+    the recorder's last sum, so your historical totals stay intact.
+  fields:
+    instance:
+      name: Instance
+      description: Free-text installation name OR config entry id of a specific integration. Leave empty to reset every entry.
+      example: Casa principal
+      selector:
+        text:

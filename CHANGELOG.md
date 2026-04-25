@@ -3,6 +3,61 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.16] — 2026-04-26
+
+### Añadido
+
+- **Servicio `canal_isabel_ii.reset_meter`.** Para usar cuando el
+  instalador de Canal cambia físicamente el contador de agua. El
+  contador nuevo arranca en cero (o cerca), lo que produce dos
+  efectos perniciosos sin este servicio:
+
+  1. La guarda monotónica de las entidades `Consumo acumulado`,
+     `Coste acumulado` y `Lectura del contador` rechaza cualquier
+     lectura inferior al último máximo restaurado, así que la
+     tarjeta de la entidad **se queda congelada** durante meses
+     hasta que el contador nuevo cruza por casualidad el valor
+     antiguo.
+  2. El `baseline_liters` del store (los litros que se cayeron al
+     hacer *trim* del cache, ver v0.5.12) corresponde al contador
+     viejo y, sumado a las lecturas nuevas, **infla artificialmente**
+     el valor cumulativo.
+
+  El nuevo servicio resuelve ambos: borra el `baseline_liters` del
+  contrato afectado en el store y dispara
+  `SIGNAL_METER_RESET.format(entry_id, contract_id)` por el
+  *dispatcher*. Las tres entidades cumulativas escuchan esa señal,
+  ponen su `_restored_value` a `None` y vuelven a publicar el
+  estado, esta vez aceptando la lectura baja como válida.
+
+  **Las estadísticas de largo plazo del *recorder* NO se tocan**:
+  la serie de coste y la de consumo siguen anclando a su `last_sum`
+  y el siguiente *push* continúa la curva sin saltos negativos. El
+  panel Energía conserva todo el histórico previo al cambio de
+  contador y la curva sigue creciendo de forma monótona — sólo el
+  contador físico vuelve a cero, no la representación gráfica de
+  cuánto agua/dinero ha pasado.
+
+  Documentado en `services.yaml` (aparece en *Herramientas para
+  desarrolladores → Acciones* con descripción y campo `instance`
+  filtrable). Vacío = todas las entradas; nombre o `entry_id` =
+  esa instalación concreta. Si la entrada no tiene contratos
+  cacheados aún, el servicio se queda en log informativo y no
+  hace daño.
+
+### Cambiado
+
+- `ReadingStore.async_reset_baseline(contract)` — nuevo método
+  pequeño que borra una entrada del diccionario `baseline_liters`
+  y persiste a disco. Usado únicamente desde el servicio nuevo;
+  separado para que sea testeable de forma aislada (un test futuro
+  puede instanciar el store sin Hass completo y verificar el
+  contrato sin tocar la lógica del servicio).
+
+- `const.py` añade `SIGNAL_METER_RESET` con el formato
+  `canal_isabel_ii_meter_reset_{entry_id}_{contract_id}` para
+  permitir reset por contrato dentro de una entrada multicontrato.
+
 ## [0.5.15] — 2026-04-26
 
 ### Añadido

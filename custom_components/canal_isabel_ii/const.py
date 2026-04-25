@@ -155,3 +155,23 @@ STORAGE_VERSION = 1
 #: matches the portal's ~7-month retention (24 * 31 * 7 = 5208) with
 #: enough headroom for the occasional gap-fill backfill.
 MAX_READINGS_PER_ENTRY = 8760
+
+# ---------------------------------------------------------------------
+# Dispatcher signals (v0.5.16+)
+# ---------------------------------------------------------------------
+
+#: Dispatcher signal fired by the ``reset_meter`` service when the
+#: physical water meter has been replaced. Format with
+#: ``entry_id`` and ``contract_id`` so each contract under a
+#: multi-contrato entry can be reset independently:
+#:
+#:     SIGNAL_METER_RESET.format(entry_id=eid, contract_id=cid)
+#:
+#: ``CanalCumulativeConsumptionSensor`` and ``CanalMeterReadingSensor``
+#: subscribe to this signal in ``async_added_to_hass`` and clear their
+#: in-memory ``_restored_value`` so the monotonic guard stops freezing
+#: the entity at the previous (now-irrelevant) high. The recorder's
+#: long-term external statistics are NOT touched: those preserve
+#: history and the next push anchors to ``last_sum`` so the Energy
+#: panel keeps a continuous curve across the meter swap.
+SIGNAL_METER_RESET = "canal_isabel_ii_meter_reset_{entry_id}_{contract_id}"

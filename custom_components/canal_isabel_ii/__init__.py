@@ -45,6 +45,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import ConfigType
 
 from .bookmarklet import (
@@ -69,6 +70,7 @@ from .const import (
     DEFAULT_IVA_PCT,
     DEFAULT_N_VIVIENDAS,
     DOMAIN,
+    SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
 from .coordinator import CanalCoordinator
@@ -97,11 +99,22 @@ SERVICE_SHOW_BOOKMARKLET = "show_bookmarklet"
 #: corruption that slipped through) have a self-service recovery
 #: button that doesn't require editing ``.storage`` files.
 SERVICE_CLEAR_COST_STATS = "clear_cost_stats"
+#: Meter-replacement service — invoked by the user (or an automation)
+#: when the physical water counter is swapped by the installer. Drops
+#: the per-contract trim baseline in the store and signals the
+#: cumulative sensors to clear their in-memory monotonic guard so the
+#: next (lower) reading from the new counter is accepted instead of
+#: being rejected as a glitch. Long-term recorder statistics are NOT
+#: touched — the next push continues forward seamlessly from the
+#: existing ``last_sum``, so the user keeps their full historical
+#: consumption / cost curves across the swap.
+SERVICE_RESET_METER = "reset_meter"
 ATTR_INSTANCE = "instance"
 
 REFRESH_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
 SHOW_BOOKMARKLET_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
 CLEAR_COST_STATS_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
+RESET_METER_SCHEMA = vol.Schema({vol.Optional(ATTR_INSTANCE): cv.string})
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -230,6 +243,76 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
             SERVICE_CLEAR_COST_STATS,
             _clear_cost_stats,
             schema=CLEAR_COST_STATS_SCHEMA,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_RESET_METER):
+
+        async def _reset_meter(call: ServiceCall) -> None:
+            """Tell the integration the physical water meter was replaced.
+
+            For each matched contract under each matched entry:
+
+            * Drop the per-contract trim baseline in the store (the
+              trimmed-out liters belonged to the OLD physical counter
+              and would otherwise inflate the new cumulative state).
+            * Fire ``SIGNAL_METER_RESET`` so the cumulative-consumption,
+              cumulative-cost and absolute-meter-reading sensors clear
+              their in-memory monotonic guards. Without this, the next
+              (now-lower) reading would be rejected and the entities
+              would freeze on the pre-swap value.
+            * Trigger a coordinator refresh so the new state hits the
+              entity card immediately.
+
+            Long-term external statistics (the Energy panel curves) are
+            **not** touched: those anchor to the recorder's ``last_sum``
+            and the next push continues forward seamlessly. The user
+            keeps their full consumption / cost history across the
+            counter swap; only the per-meter state on the entity card
+            and the now-stale baseline get cleared.
+            """
+            wanted = (call.data.get(ATTR_INSTANCE) or "").strip().lower()
+            matched_any = False
+            for entry_id, entry_data in hass.data.get(DOMAIN, {}).items():
+                if not isinstance(entry_data, dict):
+                    continue
+                store: ReadingStore | None = entry_data.get("store")
+                coord: CanalCoordinator | None = entry_data.get("coordinator")
+                name = (entry_data.get("name") or "").lower()
+                if store is None or coord is None:
+                    continue
+                if wanted and wanted not in {entry_id.lower(), name}:
+                    continue
+                matched_any = True
+                contracts = store.contracts
+                if not contracts:
+                    _LOGGER.info(
+                        "[%s] reset_meter: no contracts cached yet — "
+                        "nothing to reset; the next bookmarklet POST "
+                        "will populate fresh state",
+                        entry_id,
+                    )
+                    continue
+                for contract_id in sorted(contracts):
+                    await store.async_reset_baseline(contract_id)
+                    async_dispatcher_send(
+                        hass,
+                        SIGNAL_METER_RESET.format(entry_id=entry_id, contract_id=contract_id),
+                    )
+                    _LOGGER.info(
+                        "[%s] reset_meter: cleared baseline + signalled sensors for contract %s",
+                        entry_id,
+                        contract_id,
+                    )
+                await coord.async_request_refresh()
+            if wanted and not matched_any:
+                _LOGGER.warning(
+                    "reset_meter: no integration entry matched %r — "
+                    "use the entry id or the configured name",
+                    wanted,
+                )
+
+        hass.services.async_register(
+            DOMAIN, SERVICE_RESET_METER, _reset_meter, schema=RESET_METER_SCHEMA
         )
 
     return True

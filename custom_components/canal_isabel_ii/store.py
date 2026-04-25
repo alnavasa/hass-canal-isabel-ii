@@ -223,6 +223,26 @@ class ReadingStore:
         self._baseline_liters.clear()
         await self._store.async_remove()
 
+    async def async_reset_baseline(self, contract: str) -> None:
+        """Drop the per-contract trim baseline.
+
+        Called by the ``reset_meter`` service when the user has
+        physically replaced the water counter. The trimmed-out liters
+        accumulated under ``baseline_liters[contract]`` belonged to the
+        OLD meter; carrying them forward would inflate the cumulative
+        consumption sensor against the new (reset-to-zero) physical
+        counter. Cached per-hour readings are kept untouched — the user
+        may want to look at past consumption — but the cumulative
+        sensors will recompute from the in-cache rows alone after this
+        call (plus the implicit new baseline of 0).
+
+        Persists to disk before returning so a crash mid-reset doesn't
+        leave a half-baselined state behind.
+        """
+        if contract in self._baseline_liters:
+            del self._baseline_liters[contract]
+            await self.async_save()
+
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------
