@@ -743,7 +743,21 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         self._handle_coordinator_update()
 
     def _cost_stream(self) -> list:
-        """Compute the full cost stream for this contract from the cache."""
+        """Compute the full cost stream for this contract from the cache.
+
+        Returns ``[]`` (degrade gracefully — sensor falls back to the
+        last restored value) if any reading falls outside a known
+        :data:`tariff.VIGENCIAS` window. Without this guard, a single
+        out-of-range timestamp (e.g. an ancient backfill from before
+        vigencia 2025, or a future date past the last vigencia we've
+        shipped) would make :func:`compute_hourly_cost_stream` raise
+        ``ValueError`` from inside ``_split_period_by_vigencia``,
+        propagate up through ``_push_cost_statistics`` and trip the
+        coordinator on every tick. The user would see no cost and a
+        wall of tracebacks. We log a clear warning instead so the
+        next release of the integration (with the missing vigencia
+        appended) silently fixes things.
+        """
         rows = self._sorted_rows()
         if not rows:
             return []
@@ -754,7 +768,18 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=local_tz)
             timed.append((ts, r.liters))
-        return compute_hourly_cost_stream(timed, self._params)
+        try:
+            return compute_hourly_cost_stream(timed, self._params)
+        except ValueError as err:
+            _LOGGER.warning(
+                "[%s] Cost stream skipped — at least one reading falls "
+                "outside the known tariff vigencias: %s. The cost sensor "
+                "will keep its last value until the integration ships an "
+                "updated tariff that covers this date range.",
+                self._contract_id,
+                err,
+            )
+            return []
 
     @property
     def native_value(self) -> float | None:

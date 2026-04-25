@@ -3,6 +3,28 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.9] — 2026-04-25
+
+### Arreglado
+
+- **Lecturas fuera de cualquier vigencia conocida ya no rompen el
+  sensor de coste.** Si en el caché aparece aunque sea una sola lectura
+  cuya fecha cae fuera de toda *vigencia* modelada en `tariff.py` (por
+  ejemplo, un *backfill* histórico anterior a la vigencia 2025, o una
+  fecha futura para la que aún no se ha publicado la próxima vigencia),
+  `compute_hourly_cost_stream` lanzaba `ValueError` desde dentro de
+  `_split_period_by_vigencia`. Esa excepción se propagaba al *property*
+  `native_value` del sensor de coste acumulado y al `_push_cost_statistics`
+  que se ejecuta en cada *tick* del *coordinator*, llenando el log de
+  *tracebacks* y dejando el sensor sin valor. Ahora `_cost_stream`
+  captura el `ValueError`, registra un *warning* claro identificando
+  el contrato afectado y devuelve `[]`, lo que hace que el sensor
+  conserve el último valor restaurado (`RestoreSensor`) en lugar de
+  caer. Cuando se publique una nueva versión que incluya la vigencia
+  faltante, el cálculo se reanuda solo. Se añade test de regresión que
+  documenta el contrato (`compute_hourly_cost_stream` propaga
+  `ValueError`; los *callers* lo capturan).
+
 ## [0.5.8] — 2026-04-25
 
 ### Cambiado

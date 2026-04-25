@@ -385,3 +385,33 @@ class TestHourlyCostStream:
         # tiny but non-zero; over 100 hours it should be sub-€1 but
         # clearly more than just the 1 L of variable cost.
         assert gap_cost > 0.05, f"gap cost {gap_cost:.4f} too small — fixed cost not accruing"
+
+    def test_out_of_vigencia_reading_raises_valueerror(self):
+        # Documented contract: ``compute_hourly_cost_stream`` propagates
+        # the ``ValueError`` that ``vigencia_for`` raises when a reading
+        # falls outside every known vigencia. Callers (``sensor.py``)
+        # MUST catch this — they degrade by reusing the previous cost
+        # value rather than crashing the coordinator. A regression here
+        # would let a single ancient backfill row (or a future date the
+        # integration hasn't shipped a tariff for yet) take the cost
+        # sensor down on every coordinator tick.
+        #
+        # Note: the date echoed in the error message is the **bimonth
+        # start** that the cursor in ``_split_period_by_vigencia``
+        # rejects first, not the reading timestamp. So a reading on
+        # 2024-06-01 surfaces as a 2024-05-01 ValueError (May-June
+        # bimonth). The test asserts the year only; the exact date in
+        # the message is an implementation detail.
+        params = TariffParams(diametro_mm=15, n_viviendas=1)
+        # Pre-2025 dates aren't modelled; one such reading is enough.
+        readings = [(datetime(2024, 6, 1, 0), 5.0)]
+        try:
+            compute_hourly_cost_stream(readings, params)
+        except ValueError as err:
+            assert "2024" in str(err), f"unexpected ValueError message: {err}"
+        else:
+            raise AssertionError(
+                "expected ValueError for an out-of-vigencia reading; "
+                "if vigencia coverage was extended, update this test "
+                "with a date still outside every known vigencia."
+            )
