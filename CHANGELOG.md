@@ -3,6 +3,41 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.4.10] — 2026-04-25
+
+### Arreglado
+
+- **El enlace de la notificación abría el Lovelace en lugar de la página de
+  instalación**. v0.4.9 dejaba el link como markdown puro
+  `[texto](url)`, que renderiza a `<a href="url">texto</a>` sin
+  `target`. El frontend de Home Assistant es una SPA: su router
+  intercepta TODO click en `<a>` del mismo origen y lo enruta él mismo.
+  Como `/api/canal_isabel_ii/bookmarklet/<id>?t=…` no es una ruta del
+  Lovelace, el router caía al dashboard por defecto y el user nunca
+  llegaba a la página. Hack manual que funcionaba: click derecho →
+  *Abrir en pestaña nueva* (eso esquiva el router porque el navegador
+  maneja la nueva pestaña sin pasar por el SPA). Fix definitivo: el
+  link ahora se emite como HTML crudo
+  `<a href="…" target="_blank" rel="noopener">…</a>`. `target="_blank"`
+  hace que el navegador abra la URL nativamente en una pestaña nueva,
+  saltándose el router del frontend; `rel="noopener"` es la dureza
+  estándar para enlaces externos. `<ha-markdown>` (el renderer markdown
+  de HA) preserva ambos atributos a través de DOMPurify.
+- **Test de regresión** verifica que `target="_blank"` y
+  `rel="noopener"` están presentes en el cuerpo de la notificación,
+  pegados al `href` de la página — para que un futuro refactor no
+  pueda regresar silenciosamente a un link markdown puro.
+
+### Notas
+
+- **Acordaos de regenerar la notificación tras update**. La
+  notificación de v0.4.9 que tengáis aún viva sigue trayendo el link
+  markdown roto. *Ajustes → Herramientas para desarrolladores →
+  Acciones → `canal_isabel_ii.show_bookmarklet`* para reaparecer la
+  notificación con el link nuevo. El bookmarklet en sí (el favorito
+  en la barra) **no cambia** — solo cambia el link a la página de
+  instalación dentro de la notificación.
+
 ## [0.4.9] — 2026-04-25
 
 ### Arreglado

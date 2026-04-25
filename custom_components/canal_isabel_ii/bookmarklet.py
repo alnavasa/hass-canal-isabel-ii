@@ -326,11 +326,26 @@ def format_install_notification(
         labels = ", ".join(label for label, _url, _bm in alternates)
         alternates_hint = f"\n_La página incluye variantes adicionales para tus URLs: {labels}._\n"
 
+    # Why raw <a target="_blank"> instead of a markdown link?
+    # ----------------------------------------------------------------
+    # `[texto](url)` renders to `<a href="url">texto</a>` *without*
+    # `target="_blank"`. HA's frontend is a single-page app: its router
+    # intercepts every same-origin `<a>` click and routes it through
+    # the SPA. `/api/canal_isabel_ii/bookmarklet/<id>?t=…` is not a
+    # Lovelace route, so the SPA falls back to the default dashboard
+    # and the user never reaches the install page (v0.4.9 regression
+    # report — clicking the link landed on Lovelace; right-click →
+    # "open in new tab" worked because that path bypasses the
+    # router). `target="_blank"` makes the browser handle the
+    # navigation natively in a new tab, sidestepping the router.
+    # `rel="noopener"` is the usual hardening for new-tab links.
+    # `<ha-markdown>` (HA's markdown renderer) keeps `target` and
+    # `rel` through DOMPurify — those attrs are in its allowlist.
     return (
         f"## Bookmarklet listo — {install}\n\n"
         "Tu bookmarklet ya está generado. La forma más cómoda de instalarlo es "
         "desde la página HTML que la integración acaba de exponer:\n\n"
-        f"### → [📥 Abrir página de instalación]({page_url})\n\n"
+        f'### → <a href="{page_url}" target="_blank" rel="noopener">📥 Abrir página de instalación</a>\n\n'
         "En esa página tienes:\n"
         "- un botón **📋 Copiar bookmarklet** (un solo toque, "
         "funciona en iOS Safari);\n"

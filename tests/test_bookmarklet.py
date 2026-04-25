@@ -329,6 +329,43 @@ class TestFormatInstallNotification:
         )
         assert f"/api/canal_isabel_ii/bookmarklet/{ENTRY}?t={TOKEN}" in msg
 
+    def test_install_page_link_opens_in_new_tab(self):
+        # v0.4.10 regression guard. Markdown links `[texto](url)`
+        # render to `<a href="url">texto</a>` without `target`,
+        # which means HA's SPA router intercepts the click and
+        # falls back to the default Lovelace dashboard (the
+        # `/api/canal_isabel_ii/bookmarklet/...` path is not a
+        # Lovelace route). v0.4.9 shipped with that bug — users
+        # clicked the link and landed on the dashboard instead of
+        # the install page. The fix is raw HTML <a target="_blank">,
+        # which makes the browser handle the navigation natively
+        # in a new tab and bypasses the SPA router. Pin both
+        # `target="_blank"` and `rel="noopener"` so a future
+        # refactor can't regress to a plain markdown link.
+        bm = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        src = build_bookmarklet_source(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        msg = format_install_notification(
+            install=INSTALL,
+            bookmarklet=bm,
+            ha_url=HA_URL,
+            entry_id=ENTRY,
+            token=TOKEN,
+            source=src,
+        )
+        assert 'target="_blank"' in msg
+        assert 'rel="noopener"' in msg
+        # And it must be on the install-page link specifically, not
+        # some unrelated <a>. Anchor by checking the attributes
+        # appear next to the page URL.
+        assert (
+            f'href="/api/canal_isabel_ii/bookmarklet/{ENTRY}?t={TOKEN}" '
+            'target="_blank" rel="noopener"'
+        ) in msg
+
     def test_mentions_contract_segregation_warning(self):
         bm = build_bookmarklet(
             ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
