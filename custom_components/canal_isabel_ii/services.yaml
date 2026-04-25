@@ -27,3 +27,23 @@ show_bookmarklet:
       example: Casa principal
       selector:
         text:
+
+clear_cost_stats:
+  name: Clear cost statistics
+  description: >
+    Wipe ALL long-term cost statistics for the integration entry
+    (both ``canal_isabel_ii:cost_<contract>`` and the entity-side
+    ``sensor.<…>_coste_acumulado`` series). The next coordinator
+    refresh rebuilds the full series from a clean slate via the
+    spike-immune push. Use this if the Energy panel shows negative
+    bars or wildly wrong totals for the cost entity — for example
+    after upgrading from a pre-v0.5.4 install where HA's auto-stats
+    collided with our explicit push, or any other corruption that
+    survived the one-shot v0.5.4 migration.
+  fields:
+    instance:
+      name: Instance
+      description: Free-text installation name OR config entry id. Leave empty to clear all.
+      example: Casa principal
+      selector:
+        text:

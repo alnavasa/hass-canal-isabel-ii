@@ -3,6 +3,75 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.15] — 2026-04-26
+
+### Añadido
+
+- **Servicio `canal_isabel_ii.clear_cost_stats`.** Botón de
+  recuperación manual para usuarios que ven el panel Energía con
+  barras negativas o totales claramente equivocados en la entidad
+  `Coste acumulado`. Borra **todas** las estadísticas de largo
+  plazo de coste asociadas a la entrada (la externa
+  `canal_isabel_ii:cost_<contract>` y la auto-generada
+  `sensor.<…>_coste_acumulado`) y dispara un *refresh* del
+  coordinator: el siguiente *push* reconstruye toda la serie desde
+  cero por la ruta *spike-immune* (la misma que la migración
+  one-shot v0.5.4).
+
+  Igual que `refresh` y `show_bookmarklet`, acepta `instance:` con
+  el nombre libre de la instalación o el `entry_id`; vacío
+  significa *todas las entradas*. Documentado en `services.yaml`,
+  por lo que aparece en *Herramientas para desarrolladores →
+  Acciones* con descripción y validación de campos.
+
+  Caso de uso: el reporte original (v0.5.7, panel Energía con barras
+  −4.54 €, +14.91 €, +71.92 € o −1336.46 € según el rango) podría
+  venir de:
+
+  1. Restos de auto-stats pre-v0.5.4 que escaparon al filtro de la
+     migración one-shot.
+  2. Drift residual entre la serie auto-generada
+     (`state_class=total`, recorder) y nuestro *push* explícito
+     que sólo se solapan en el ventana visible — la corrección
+     v0.5.4 + v0.5.5 los unifica de cara al futuro pero no
+     reescribe lo que ya estaba mal en disco para la entrada
+     concreta del usuario afectado.
+
+  En vez de pedirles que editen `.storage/core.config_entries`
+  para forzar otra migración, el servicio expone esa lógica como
+  un click. Tras llamarlo, el panel Energía vuelve a llenarse a
+  medida que el coordinator publica la serie reconstruida (puede
+  tardar uno o dos *ticks* horarios).
+
+- **6 tests de regresión end-to-end del *push* de coste**
+  (`tests/test_continuation_stats.py::TestCostPushPipelineMonotonicity`).
+  La pipeline pura `compute_hourly_cost_stream → cumulative_to_deltas
+  → merge_forward_and_backfill` queda blindada contra la clase de
+  bugs que producirían barras negativas:
+
+  1. Push 2 con progresión B1→B2 manteniéndose monótona.
+  2. Tras dos pushes consecutivos, ninguna hora regresa.
+  3. Cruce de límite de bimestre dentro del mismo *push*.
+  4. Cache que arranca a mitad del bimestre (rango parcial visible).
+  5. Cache con hueco interno (gap en el medio del rango).
+  6. *Trim* del cache donde las filas viejas del *push* 1
+     **sobreviven intactas** en el recorder y el *push* 2 sólo
+     extiende el extremo derecho.
+
+  Los seis pasan en HEAD: confirma que el bug del usuario **no**
+  proviene del cálculo del coste ni de la fusión con la serie
+  existente. La causa más probable es residuo histórico en
+  estadísticas, que el nuevo servicio resuelve directamente.
+
+### Refactor
+
+- Extraído el cuerpo de `_migrate_cost_stats_v054` a un *helper*
+  reutilizable `_clear_cost_stats_for_entry`. La migración one-shot
+  pasa a ser un *thin wrapper* que delega; el servicio nuevo usa
+  el mismo *helper*. Sin cambio funcional para usuarios existentes
+  — `CONF_COST_STATS_MIGRATED` sigue siendo el *gate* idempotente
+  de la ejecución one-shot al primer arranque.
+
 ## [0.5.14] — 2026-04-25
 
 ### Arreglado

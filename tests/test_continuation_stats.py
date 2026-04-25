@@ -491,3 +491,428 @@ class TestCumulativeToDeltas:
         out = cumulative_to_deltas(items)
         # Input order: index-by-index, not chronological.
         assert [ts for ts, _ in out] == [_hour(2), _hour(0), _hour(1)]
+
+
+# =====================================================================
+# End-to-end cost-push pipeline regression — the bug a v0.5.7 user hit
+# =====================================================================
+#
+# User report (v0.5.7): the Energy panel's water-cost view showed
+# NEGATIVE totals (e.g. -4,54 €, -1336,46 €) when the selected date
+# range included days for which Canal had not yet served consumption
+# data. The screenshots showed positive numbers shrinking and going
+# negative as the range was extended further into the past.
+#
+# Hypothesised mechanism: ``compute_hourly_cost_stream`` re-derives
+# ``per_m3_with_iva`` per push using the bimonth-to-date ``period_m3``.
+# As more consumption data arrives during an active bimonth, period_m3
+# grows, the block tariff progresses (B1 → B2 → B3 → B4), and the
+# blended ``per_m3_with_iva`` rate JUMPS upward. Every previously-
+# emitted hour in that bimonth gets a HIGHER ``cumulative_eur`` value
+# in the next push. The push pipeline then runs:
+#
+#     deltas   = cumulative_to_deltas(new_stream)         # new bars
+#     existing = (read recorder from earliest_new - 1h)   # old sums
+#     merged   = merge_forward_and_backfill(deltas, existing)
+#     pusher(...)                                          # upsert
+#
+# The tests below pin the invariant the recorder & Energy panel rely on
+# across that two-push sequence: even when ``per_m3_with_iva`` jumps
+# between pushes, the recorder series after the SECOND push must still
+# be monotone-non-decreasing AND every previously-pushed hour's sum
+# must be ≥ its old sum (no regression at any timestamp). A regression
+# would be the recipe for ``sum_at_end - sum_at_start = NEGATIVE`` on
+# the panel's range query.
+#
+# Why this lives in test_continuation_stats.py: it exercises the merge
+# pipeline end-to-end with REAL cost-stream input (not synthetic delta
+# tuples) — that's the integration the existing TestCumulativeToDeltas
+# tests stop short of covering.
+
+
+def _load_tariff_module():
+    """Load tariff.py with the same standalone trick as test_tariff.py.
+
+    Sidesteps custom_components/__init__.py side effects so we don't
+    need a full HA test rig to exercise the cost computation.
+    """
+    import importlib.util as _ilu
+    import os as _os2
+    import sys as _sys2
+    import types as _types
+    from pathlib import Path as _Path
+
+    repo = _Path(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__))))
+    src_dir = repo / "custom_components" / "canal_isabel_ii"
+    pkg_name = "_canal_isabel_ii_for_test_pipeline"
+    if pkg_name not in _sys2.modules:
+        pkg = _types.ModuleType(pkg_name)
+        pkg.__path__ = [str(src_dir)]
+        _sys2.modules[pkg_name] = pkg
+    full = f"{pkg_name}.tariff"
+    if full in _sys2.modules:
+        return _sys2.modules[full]
+    spec = _ilu.spec_from_file_location(full, src_dir / "tariff.py")
+    assert spec and spec.loader
+    m = _ilu.module_from_spec(spec)
+    _sys2.modules[full] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+_tariff = _load_tariff_module()
+compute_hourly_cost_stream = _tariff.compute_hourly_cost_stream
+
+
+def _build_readings_at_constant_rate(
+    start: datetime,
+    n_hours: int,
+    liters_per_hour: float,
+) -> list[tuple[datetime, float]]:
+    """Hourly stream of constant-consumption readings — the driver for
+    the two-push regression below."""
+    return [(start + timedelta(hours=i), liters_per_hour) for i in range(n_hours)]
+
+
+def _stream_to_recorder_rows(stream) -> list[tuple[datetime, float]]:
+    """Convert a ``compute_hourly_cost_stream`` output into the
+    ``(ts, sum)`` shape that the recorder hands back via
+    ``statistics_during_period``. The cost-stream output IS already the
+    cumulative sum, so this is a pure re-shape — no math.
+    """
+    return [(hc.timestamp, hc.cumulative_eur) for hc in stream]
+
+
+def _full_push_cycle(
+    new_stream,
+    existing_recorder_rows: list[tuple[datetime, float]],
+) -> list[tuple[datetime, float]]:
+    """Reproduce the production push pipeline end-to-end.
+
+    This mirrors ``CanalCumulativeCostSensor._submit_running_stats``
+    one-for-one (sans the actual recorder I/O) for the
+    "have-prior-stats" branch — which is the branch every push after
+    the very first one takes, and the branch the user's bug surfaces in.
+    """
+    new_items = [(hc.timestamp, hc.cumulative_eur) for hc in new_stream]
+    deltas = cumulative_to_deltas(new_items)
+    return merge_forward_and_backfill(deltas, existing_recorder_rows)
+
+
+class TestCostPushPipelineMonotonicity:
+    """End-to-end: two consecutive cost pushes against the same
+    bimonth, where the second push has more cache than the first AND
+    the extra consumption pushes ``period_m3`` across a block-tariff
+    boundary.
+
+    Pins the contract the Energy panel depends on: every recorder sum
+    after the second push is ≥ every previous recorder sum, AND no
+    hour's sum REGRESSES from push 1 to push 2.
+    """
+
+    _params = _tariff.TariffParams(
+        diametro_mm=15,
+        n_viviendas=1,
+        cuota_supl_alc_eur_m3=0.1,
+        iva_pct=10.0,
+    )
+
+    # Mar-Apr 2026 bimonth: Mar 1 -> May 1 (61 days x 24h = 1464 hours).
+    # Block thresholds in this bimonth (DP=61): B1 ≤ 20.33 m³,
+    # B2 (20.33, 40.67], B3 (40.67, 61.0], B4 > 61.0. We pick a
+    # consumption rate that puts the SECOND push squarely in B2 so the
+    # blended per_m3 jumps relative to the first push (which is B1-only).
+    _BIMONTH_START = datetime(2026, 3, 1, 0, 0, 0)
+
+    def test_second_push_does_not_regress_any_hour_from_first(self):
+        """The user's exact failure mode pinned: a hour's recorder sum
+        after push 2 must be ≥ that same hour's sum after push 1.
+
+        If this fails, the Energy panel computing
+        ``sum_at_end - sum_at_start`` for ANY range that brackets that
+        hour can render a NEGATIVE total. That's the negative-€ bar
+        the v0.5.7 user reported.
+        """
+        # Push 1: 30 days of cache, low rate → all in B1.
+        # 30 days x 24 hours x 14 L = 10.08 m^3 over the 30-day window.
+        push1_readings = _build_readings_at_constant_rate(
+            self._BIMONTH_START, n_hours=30 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        # Push 2: 50 days of cache (extends 20 days into Apr) at a
+        # higher rate so period_m3 crosses 20.33 m³ → enters B2. The
+        # extension represents the user pulling the bookmarklet again
+        # after consumption picked up.
+        push2_readings = _build_readings_at_constant_rate(
+            self._BIMONTH_START, n_hours=50 * 24, liters_per_hour=22.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        # Index push 1 sums by timestamp for the cross-push comparison.
+        push1_by_ts = dict(push1_recorder)
+        # Build the same index for push 2.
+        push2_by_ts = dict(push2_recorder)
+        # Every hour that was in push 1 must still be in push 2 (no
+        # rows lost) AND its sum must be ≥ the push-1 value.
+        regressed: list[tuple[datetime, float, float]] = []
+        for ts, old_sum in push1_by_ts.items():
+            assert ts in push2_by_ts, (
+                f"hour {ts.isoformat()} present in push 1 vanished from push 2 "
+                f"— the recorder would still hold the stale row, violating "
+                f"the merge replay's totality"
+            )
+            new_sum = push2_by_ts[ts]
+            if new_sum < old_sum - 1e-9:
+                regressed.append((ts, old_sum, new_sum))
+        assert not regressed, (
+            "cost-push pipeline regressed at "
+            f"{len(regressed)}/{len(push1_by_ts)} hour(s); first 3: "
+            f"{[(ts.isoformat(), f'{o:.4f}€', f'{n:.4f}€') for ts, o, n in regressed[:3]]}"
+        )
+
+    def test_merged_recorder_series_is_monotone_after_second_push(self):
+        """Even if individual hours are revised upward between pushes,
+        the FINAL recorder series must be monotone-non-decreasing in
+        chronological order. A single non-monotone tick reads as a
+        meter reset to TOTAL_INCREASING (and as a negative bar to
+        anything that takes consecutive diffs)."""
+        push1_readings = _build_readings_at_constant_rate(
+            self._BIMONTH_START, n_hours=30 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        push2_readings = _build_readings_at_constant_rate(
+            self._BIMONTH_START, n_hours=50 * 24, liters_per_hour=22.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        prev = -1.0
+        for ts, sm in push2_recorder:
+            assert sm >= prev - 1e-9, (
+                f"non-monotone at {ts.isoformat()} ({sm:.4f} € < prev {prev:.4f} €)"
+            )
+            prev = sm
+
+    def test_no_regression_when_cache_extends_into_a_new_bimonth(self):
+        """Push 1 covers only Jan-Feb. Push 2 extends into Mar-Apr.
+        The Jan-Feb hours' sums must not change between pushes (their
+        bimonth is closed); the new Mar hours must continue monotonically
+        from where Jan-Feb left off.
+
+        Critical because cum_eur is a GLOBAL running sum across all
+        bimonths in a single push; if the boundary handling loses or
+        duplicates the Jan-Feb final cum_eur, every Mar-Apr hour comes
+        out shifted relative to push 1's view of the world.
+        """
+        push1_readings = _build_readings_at_constant_rate(
+            datetime(2026, 1, 1, 0), n_hours=59 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        # Push 2 = push 1 + 25 days of Mar at the same rate.
+        push2_readings = push1_readings + _build_readings_at_constant_rate(
+            datetime(2026, 3, 1, 0), n_hours=25 * 24, liters_per_hour=14.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        push1_by_ts = dict(push1_recorder)
+        push2_by_ts = dict(push2_recorder)
+        regressed: list[tuple[datetime, float, float]] = []
+        for ts, old_sum in push1_by_ts.items():
+            new_sum = push2_by_ts.get(ts)
+            if new_sum is None:
+                continue
+            if new_sum < old_sum - 1e-9:
+                regressed.append((ts, old_sum, new_sum))
+        assert not regressed, (
+            f"{len(regressed)} hour(s) regressed across the bimonth boundary; "
+            f"first 3: {[(ts.isoformat(), f'{o:.4f}€', f'{n:.4f}€') for ts, o, n in regressed[:3]]}"
+        )
+        # And the final series stays monotone.
+        prev = -1.0
+        for ts, sm in push2_recorder:
+            assert sm >= prev - 1e-9, (
+                f"non-monotone at {ts.isoformat()} ({sm:.4f} € < prev {prev:.4f} €)"
+            )
+            prev = sm
+
+    def test_no_regression_when_cache_starts_mid_bimonth(self):
+        """User's first bookmarklet pull happens mid-bimonth — cache
+        has Mar 10-Mar 30 only, no Mar 1-9. Push 2 then extends back
+        to Mar 5 (user filters portal for an earlier window).
+
+        ``compute_hourly_cost_stream`` always anchors its ``cursor`` at
+        the bimonth's p_start (Mar 1) regardless of the first reading's
+        timestamp — it accumulates ``fixed_per_hour`` for every empty
+        leading hour to keep the cuota fija reflected in the first
+        emitted row's cum_eur. Across pushes, the FIRST emitted row's
+        cum_eur shifts — push 1's first row is Mar 10, push 2's is
+        Mar 5 (5 fewer days of fixed catchup). Common Mar 10+ hours
+        must still match within the per-m³ rate revision.
+        """
+        push1_readings = _build_readings_at_constant_rate(
+            datetime(2026, 3, 10, 0), n_hours=20 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        # Push 2: backfill Mar 5-9 PLUS keep Mar 10-30. Period_m3 of
+        # Mar-Apr grows by 5*24*14 = 1680 L = 1.68 m³ — still in B1
+        # (B1 ≤ 20.33 m³ for DP=61) so per_m3_with_iva stays the same.
+        push2_readings = _build_readings_at_constant_rate(
+            datetime(2026, 3, 5, 0), n_hours=25 * 24, liters_per_hour=14.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        push2_by_ts = dict(push2_recorder)
+        # Common hours (Mar 10-30) — push 2's sum must not regress
+        # below push 1's sum.
+        regressed: list[tuple[datetime, float, float]] = []
+        for ts, old_sum in push1_recorder:
+            new_sum = push2_by_ts.get(ts)
+            if new_sum is None:
+                continue
+            if new_sum < old_sum - 1e-9:
+                regressed.append((ts, old_sum, new_sum))
+        assert not regressed, (
+            f"{len(regressed)} hour(s) regressed when cache backfilled earlier "
+            f"in same bimonth; first 3: "
+            f"{[(ts.isoformat(), f'{o:.4f}€', f'{n:.4f}€') for ts, o, n in regressed[:3]]}"
+        )
+
+    def test_no_regression_when_cache_has_internal_gap(self):
+        """Mid-bimonth gap: cache has Mar 1-15 and Mar 25-30, NOTHING
+        for Mar 16-24 (user didn't pull, or sensor was offline). Push
+        2 fills the gap with the missing hours.
+
+        compute_hourly_cost_stream's ``cursor`` walk over the gap
+        accumulates fixed_per_hour but emits NO rows for those gap
+        hours. Push 2's added rows for Mar 16-24 must slot into the
+        recorder without making any subsequent hour's sum go down.
+        """
+        # Push 1 — gappy cache.
+        push1_readings = _build_readings_at_constant_rate(
+            datetime(2026, 3, 1, 0), n_hours=15 * 24, liters_per_hour=14.0
+        ) + _build_readings_at_constant_rate(
+            datetime(2026, 3, 25, 0), n_hours=6 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        # Push 2 — gap filled.
+        push2_readings = _build_readings_at_constant_rate(
+            datetime(2026, 3, 1, 0), n_hours=30 * 24, liters_per_hour=14.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        push2_by_ts = dict(push2_recorder)
+        regressed = []
+        for ts, old_sum in push1_recorder:
+            new_sum = push2_by_ts.get(ts)
+            if new_sum is None:
+                continue
+            if new_sum < old_sum - 1e-9:
+                regressed.append((ts, old_sum, new_sum))
+        assert not regressed, f"{len(regressed)} hour(s) regressed when gap filled in same bimonth"
+        prev = -1.0
+        for ts, sm in push2_recorder:
+            assert sm >= prev - 1e-9, (
+                f"non-monotone at {ts.isoformat()} ({sm:.4f} € < prev {prev:.4f} €)"
+            )
+            prev = sm
+
+    def test_no_regression_when_period_m3_drops_due_to_cache_trim(self):
+        """The trim case (most likely the v0.5.7 user's bug):
+
+        - Push 1: cache has 80 days of Jan-Feb-Mar at constant rate.
+          period_m3 of Jan-Feb = 13.44 m³ (in B1).
+        - Push 2: cache has been trimmed — first 30 days of Jan are
+          gone (MAX_READINGS_PER_ENTRY exceeded). Now period_m3 of
+          Jan-Feb is only 5.04 m³.
+
+        period_m3 didn't cross a block boundary (B1→B1) so per_m3 is
+        unchanged, but the cuota fija catchup over the missing leading
+        hours of Jan now happens against a SMALLER period_hours
+        denominator effectively — wait no, period_hours = (p_end-p_start).days
+        * 24, fixed regardless of trim.
+
+        The real risk: the FIRST emitted row's cum_eur changes between
+        pushes (push 1's first row is Jan 1, push 2's is Feb 1) so the
+        delta produced by ``cumulative_to_deltas`` for that row is
+        different. Recorder rows for trimmed-out hours stay stale in
+        the recorder (untouched by push 2). The seam between the
+        untouched-old rows and push 2's freshly-replayed rows can be
+        the source of a negative bar.
+
+        This is the smoking-gun test for the user's bug: if the
+        recorder series after push 2 isn't monotone OR push 2 regresses
+        any hour relative to push 1, the bug is real.
+        """
+        # Push 1 — full Jan-Feb bimonth + half of Mar-Apr.
+        push1_readings = _build_readings_at_constant_rate(
+            datetime(2026, 1, 1, 0), n_hours=80 * 24, liters_per_hour=14.0
+        )
+        push1_stream = compute_hourly_cost_stream(push1_readings, self._params)
+        push1_recorder = _full_push_cycle(push1_stream, existing_recorder_rows=[])
+
+        # Push 2 — first 30 days of cache TRIMMED OUT (cap exceeded);
+        # cache now starts at Feb 1 and extends 60 days (so Feb 1 →
+        # Apr 1: covers end of Jan-Feb bimonth + half of Mar-Apr).
+        push2_readings = _build_readings_at_constant_rate(
+            datetime(2026, 1, 31, 0), n_hours=60 * 24, liters_per_hour=14.0
+        )
+        push2_stream = compute_hourly_cost_stream(push2_readings, self._params)
+        push2_recorder = _full_push_cycle(push2_stream, existing_recorder_rows=push1_recorder)
+
+        push2_by_ts = dict(push2_recorder)
+        # The trimmed-out hours (Jan 1 - Jan 30) MUST keep their old
+        # sum from push 1 (they're untouched in the recorder). The
+        # surviving common hours (Jan 31 - end of push 1) must not
+        # regress.
+        regressed: list[tuple[datetime, float, float]] = []
+        for ts, old_sum in push1_recorder:
+            new_sum = push2_by_ts.get(ts)
+            if new_sum is None:
+                # Hour not in push 2 — recorder still has push 1's
+                # value. That's fine on its own; the issue is only if
+                # the SEAM between this hour and the next push-2 hour
+                # produces a regression.
+                continue
+            if new_sum < old_sum - 1e-9:
+                regressed.append((ts, old_sum, new_sum))
+        assert not regressed, (
+            f"{len(regressed)}/{len(push1_recorder)} hour(s) regressed across "
+            f"a cache trim; first 3: "
+            f"{[(ts.isoformat(), f'{o:.4f}€', f'{n:.4f}€') for ts, o, n in regressed[:3]]}"
+        )
+
+        # And — the smoking gun assertion. The combined view of the
+        # recorder after push 2 (untouched-old + freshly-replayed) must
+        # itself be monotone-non-decreasing in chronological order. We
+        # simulate that combined view by overlaying push 2 onto push 1.
+        combined: dict[datetime, float] = dict(push1_recorder)  # untouched
+        combined.update(push2_by_ts)  # push 2 wins on collision
+        combined_sorted = sorted(combined.items(), key=lambda kv: kv[0])
+        prev_ts = None
+        prev_sum = -1.0
+        non_monotone: list[tuple[datetime, float, datetime, float]] = []
+        for ts, sm in combined_sorted:
+            if sm < prev_sum - 1e-9:
+                non_monotone.append((prev_ts, prev_sum, ts, sm))
+            prev_ts = ts
+            prev_sum = sm
+        assert not non_monotone, (
+            f"recorder series after push 2 is NON-MONOTONE in "
+            f"{len(non_monotone)} place(s) — Energy panel will render "
+            f"NEGATIVE bars at each. First 3: "
+            f"{[(p.isoformat(), f'{ps:.4f}€', n.isoformat(), f'{ns:.4f}€') for p, ps, n, ns in non_monotone[:3]]}"
+        )
