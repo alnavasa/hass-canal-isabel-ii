@@ -43,7 +43,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "Tarifa Canal de Isabel II",
+        "title": "Canal de Isabel II",
+        "description": "¿Qué quieres hacer?",
+        "menu_options": {
+          "cost_params": "Editar parámetros de tarifa (€)",
+          "rotate_token": "Rotar token de acceso"
+        }
+      },
+      "cost_params": {
+        "title": "Parámetros de tarifa",
         "description": "Edita los parámetros que se usan para calcular el coste. También puedes desactivar la entidad de coste si ya no la necesitas — los sensores de consumo (m³) seguirán funcionando.",
         "data": {
           "enable_cost": "Calcular precio (€) además del consumo (m³)",
@@ -59,6 +67,10 @@
           "cuota_supl_alc_eur_m3": "El valor exacto está en tu factura, etiquetado \"Cuota suplementaria de alcantarillado\". 0,0 si tu municipio no la cobra.",
           "iva_pct": "Porcentaje de IVA. Por defecto 10 %."
         }
+      },
+      "rotate_token": {
+        "title": "Rotar token",
+        "description": "Se generará un token nuevo de 192 bits para esta instalación. El bookmarklet anterior dejará de funcionar al instante — tendrás que pegar el nuevo en el navegador desde la notificación que aparecerá al confirmar. Útil si sospechas que el token se ha filtrado, o si quieres invalidar accesos antiguos."
       }
     }
   },
@@ -102,6 +114,26 @@
         "instance": {
           "name": "Instalación",
           "description": "Nombre o entry_id de la integración cuyo bookmarklet quieres ver."
+        }
+      }
+    },
+    "clear_cost_stats": {
+      "name": "Borrar estadísticas de coste",
+      "description": "Borra todas las estadísticas de largo plazo de coste (entidad y serie externa) y reconstruye desde cero. Útil si el panel Energía muestra barras negativas o totales claramente equivocados en la entidad Coste acumulado.",
+      "fields": {
+        "instance": {
+          "name": "Instalación",
+          "description": "Nombre o entry_id de la integración. Vacío = todas."
+        }
+      }
+    },
+    "reset_meter": {
+      "name": "Reset del contador",
+      "description": "Avisa de que el contador físico de agua ha sido sustituido. Limpia la memoria monotónica de los sensores cumulativos y la baseline del cache para que la nueva lectura (más baja) sea aceptada. Las estadísticas de largo plazo NO se tocan — el panel Energía conserva todo el histórico.",
+      "fields": {
+        "instance": {
+          "name": "Instalación",
+          "description": "Nombre o entry_id de la integración. Vacío = todas las instalaciones."
         }
       }
     }

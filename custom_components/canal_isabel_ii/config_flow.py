@@ -37,8 +37,13 @@ The entry starts with no bound contract id. The first successful
 POST via the bookmarklet binds it (see ``ingest.py``) and triggers an
 entity reload so the sensors materialise without an HA restart.
 
-Re-auth (token rotation) is not modelled — if the user needs a new
-token, they delete and recreate the entry.
+Token rotation lives in the OptionsFlow as of v0.5.18. The user
+opens *Configurar* on the integration card, picks "Rotar token" from
+the menu, and confirms; we generate a new ``secrets.token_hex(24)``,
+write it to ``entry.data[CONF_TOKEN]`` and re-publish the install
+notification with the bookmarklet rebuilt around the new token. The
+old bookmarklet (and any URL with the old ``?t=…`` query) stops
+working immediately, which is the whole point.
 """
 
 from __future__ import annotations
@@ -268,24 +273,44 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class CanalOptionsFlow(config_entries.OptionsFlow):
-    """Edit cost parameters (and toggle the cost feature) post-install.
+    """Post-install settings: cost params + token rotation.
 
-    Stored as ``entry.options`` (HA convention for editable settings).
-    On save, ``async_setup_entry`` re-runs via the update listener
-    wired in ``__init__.py``; the new values flow through to the
-    sensors on that reload.
+    Top-level menu (``init`` step) presents two branches:
 
-    Reads from ``entry.options`` first (last-saved values) and falls
-    back to ``entry.data`` (initial wizard values) so the form
-    pre-populates with whatever the user last saw.
+    * ``cost_params`` — original v0.5.x form. Stored as
+      ``entry.options`` (HA convention for editable settings). On
+      save the update listener in ``__init__.py`` reloads the entry
+      so the sensor platform re-evaluates which entities should
+      exist based on the new ``enable_cost`` value.
+    * ``rotate_token`` (v0.5.18+) — confirm-and-go step that
+      regenerates the 192-bit token in ``entry.data`` and
+      re-publishes the install notification with the bookmarklet
+      rebuilt around the new token. The previous bookmarklet stops
+      working the moment the token in ``entry.data`` flips, so the
+      user MUST install the new bookmarklet before clicking again.
+
+    The cost form reads from ``entry.options`` first (last-saved
+    values) and falls back to ``entry.data`` (initial wizard values)
+    so the inputs pre-populate with whatever the user last saw.
     """
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Single step — show the same fields as the wizard's cost step
-        plus the enable_cost toggle so the user can disable cost entirely."""
+        """Top-level menu — branch to cost editing or token rotation."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["cost_params", "rotate_token"],
+        )
+
+    async def async_step_cost_params(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Edit cost-feature toggle + the four tariff parameters.
+
+        Same fields as the wizard's cost step, plus the
+        ``enable_cost`` checkbox so a user can switch cost entities
+        off without deleting the integration.
+        """
         merged = {**self._entry.data, **self._entry.options}
 
         if user_input is not None:
@@ -317,4 +342,68 @@ class CanalOptionsFlow(config_entries.OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="cost_params", data_schema=schema)
+
+    async def async_step_rotate_token(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Rotate the per-entry 192-bit token.
+
+        Two-pass form:
+
+        1. First call (``user_input is None``): show an empty form
+           with a long descriptive blurb explaining what's about to
+           happen and what the user must do afterwards (re-install
+           the bookmarklet). The form has no inputs — clicking
+           Submit is the consent.
+        2. Second call (``user_input is not None``): generate
+           ``secrets.token_hex(24)``, persist into ``entry.data``,
+           and re-publish the bookmarklet install notification so
+           the user sees the new bookmarklet code immediately.
+
+        Note: the old bookmarklet stops working the moment we update
+        ``entry.data[CONF_TOKEN]``. The ingest view checks tokens by
+        ``hmac.compare_digest`` against the live entry data on every
+        request, so there's no cache-invalidation gap.
+
+        We persist via ``async_update_entry`` (writes to
+        ``entry.data``) rather than ``async_create_entry`` (which
+        only writes to ``entry.options``). ``entry.options`` is for
+        editable settings; the token is operational state — it
+        belongs in ``entry.data`` next to the other ingest config.
+
+        After rotating we return ``async_create_entry(title="",
+        data=...)`` with the existing options unchanged so the
+        OptionsFlow closes cleanly. The update listener in
+        ``__init__.py`` picks up the token change via
+        ``cache["token"] = entry.data.get("token", "")`` without
+        needing an entry reload (sensors don't depend on the token).
+        """
+        if user_input is not None:
+            new_token = secrets.token_hex(24)  # 48 chars, 192 bits
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data={**self._entry.data, CONF_TOKEN: new_token},
+            )
+            # Re-publish the bookmarklet so the user can copy the
+            # one with the new token. Lazy import to dodge the
+            # circular dep: ``__init__.py`` imports from
+            # ``config_flow.py`` at startup, so we cannot put this
+            # import at the top of this file.
+            from . import _publish_bookmarklet_notification
+
+            await _publish_bookmarklet_notification(self.hass, self._entry)
+            _LOGGER.info(
+                "[%s] Token rotated; new bookmarklet notification published",
+                self._entry.entry_id,
+            )
+            # Return without touching options (token is in data, not
+            # options — but the OptionsFlow still needs an
+            # ``async_create_entry`` to close).
+            return self.async_create_entry(title="", data=dict(self._entry.options))
+
+        # First pass — empty schema, just a Submit button. The long
+        # explanation lives in strings.json under
+        # options.step.rotate_token.description.
+        return self.async_show_form(
+            step_id="rotate_token",
+            data_schema=vol.Schema({}),
+        )

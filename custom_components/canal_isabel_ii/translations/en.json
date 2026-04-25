@@ -43,7 +43,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "Canal de Isabel II tariff",
+        "title": "Canal de Isabel II",
+        "description": "What do you want to do?",
+        "menu_options": {
+          "cost_params": "Edit tariff parameters (€)",
+          "rotate_token": "Rotate access token"
+        }
+      },
+      "cost_params": {
+        "title": "Tariff parameters",
         "description": "Edit the parameters used to compute cost. You can also disable the cost entity if you no longer need it — the consumption (m³) sensors keep working.",
         "data": {
           "enable_cost": "Compute price (€) on top of consumption (m³)",
@@ -59,6 +67,10 @@
           "cuota_supl_alc_eur_m3": "The exact value is on your bill, labelled \"Cuota suplementaria de alcantarillado\". 0.0 if your municipality doesn't charge it.",
           "iva_pct": "VAT percentage. Default 10 %."
         }
+      },
+      "rotate_token": {
+        "title": "Rotate token",
+        "description": "A new 192-bit token will be generated for this installation. The previous bookmarklet will stop working immediately — you'll need to paste the new one into your browser from the notification that appears on confirm. Useful if you suspect the token has leaked or you want to invalidate older access."
       }
     }
   },
@@ -102,6 +114,26 @@
         "instance": {
           "name": "Installation",
           "description": "Name or entry_id of the integration whose bookmarklet you want to see."
+        }
+      }
+    },
+    "clear_cost_stats": {
+      "name": "Clear cost statistics",
+      "description": "Delete all long-term cost statistics (entity and external series) and rebuild from scratch. Useful if the Energy panel shows negative bars or clearly wrong totals on the Cumulative cost entity.",
+      "fields": {
+        "instance": {
+          "name": "Installation",
+          "description": "Name or entry_id of the integration. Empty = all."
+        }
+      }
+    },
+    "reset_meter": {
+      "name": "Reset meter",
+      "description": "Notify that the physical water meter has been replaced. Clears the monotonic memory of the cumulative sensors and the cache baseline so the new (lower) reading is accepted. Long-term statistics are NOT touched — the Energy panel keeps the full history.",
+      "fields": {
+        "instance": {
+          "name": "Installation",
+          "description": "Name or entry_id of the integration. Empty = all installations."
         }
       }
     }

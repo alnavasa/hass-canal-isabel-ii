@@ -3,6 +3,101 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.18] — 2026-04-26
+
+### Añadido
+
+- **Rotación de token desde *Configurar*** sin tener que borrar y
+  recrear la integración. Hasta ahora el único camino para invalidar
+  el token de una instalación era eliminarla del listado de
+  integraciones y volver a añadirla — destruyendo de paso el cache
+  local de lecturas, el `baseline_liters` (litros que se cayeron en
+  *trims* del cache, ver v0.5.12), las estadísticas de coste de largo
+  plazo y obligando al usuario a redescargar todo desde el portal.
+
+  El nuevo flujo:
+
+  1. *Ajustes → Dispositivos y servicios → Canal de Isabel II →
+     Configurar*.
+  2. Se muestra un menú con dos opciones: **Editar parámetros de
+     tarifa (€)** (formulario de v0.5.x) y **Rotar token de acceso**
+     (nuevo).
+  3. Al elegir "Rotar token" se enseña una pantalla descriptiva
+     explicando exactamente qué va a pasar y qué tiene que hacer el
+     usuario después (volver a pegar el bookmarklet en el navegador).
+     El único botón es Confirmar — no hay inputs.
+  4. Al confirmar, se genera un `secrets.token_hex(24)` (192 bits,
+     mismo generador que usa el wizard inicial), se persiste en
+     `entry.data[CONF_TOKEN]` mediante
+     `hass.config_entries.async_update_entry(...)` y se vuelve a
+     publicar la notificación persistente del bookmarklet con el
+     `notification_id = canal_bookmarklet_<entry_id>` (que, al
+     coincidir con la del install original, simplemente la reemplaza
+     en sitio — no se acumulan notificaciones huérfanas).
+
+  Invariantes clave que esto preserva:
+
+  - El bookmarklet anterior **deja de funcionar al instante**. Tanto
+    el endpoint POST (`ingest.py`, línea ≈146) como la página
+    bootstrap del bookmarklet (`bookmarklet_view.py`, línea ≈131)
+    leen el token desde la fuente viva (`hass.data[DOMAIN][entry_id]`
+    o `config_entry.data` respectivamente) y lo comparan con
+    `secrets.compare_digest`, sin cachear nada por su cuenta. La
+    actualización de `entry.data` propaga atómicamente vía el
+    `_async_update_listener` ya existente (línea 530 de
+    `__init__.py`), que copia `entry.data["token"]` al cache.
+  - El cache de lecturas (`store.py`), el `baseline_liters`, las
+    estadísticas de largo plazo y la binding contract↔entry **no se
+    tocan**. La rotación es puramente del secreto compartido — todo
+    el estado funcional persiste.
+  - No se dispara reload de la entrada (solo `async_update_entry` +
+    re-publicación de la notificación). Las entidades no leen el
+    token, así que no necesitan re-evaluación.
+  - Se persiste en `entry.data` (no `entry.options`) porque el token
+    es estado operacional, no preferencia editable. Convención HA:
+    `data` = configuración inmutable durante la vida de la entrada
+    (token, URL, contract id), `options` = ajustes que el usuario
+    puede tocar después (parámetros de tarifa).
+
+  El paso `rotate_token` usa el patrón "two-pass form" estándar de
+  HA: primera llamada (`user_input is None`) renderiza la pantalla
+  descriptiva con `vol.Schema({})` (sin inputs), segunda llamada
+  (`user_input is not None`) ejecuta la rotación. El consentimiento
+  es el clic en Confirmar.
+
+### Cambiado
+
+- **`OptionsFlow` ahora es un menú top-level** (`async_show_menu`)
+  con dos ramas — `cost_params` y `rotate_token`. La lógica que
+  antes vivía en `async_step_init` (formulario de tarifa) se ha
+  movido sin cambios funcionales a `async_step_cost_params`. El
+  comportamiento al editar parámetros de tarifa es idéntico al de
+  v0.5.x (mismas validaciones, mismos defaults, mismo reload del
+  entry si cambia `enable_cost`).
+
+- **Mensaje de abort `reauth_not_supported`** ya no es la única
+  ruta para "necesito un token nuevo". Sigue mostrándose si HA
+  intenta una re-autenticación automática (que no existe en este
+  flujo, los datos los aporta el navegador), pero el camino real
+  para el usuario es ahora *Configurar → Rotar token*.
+
+### Traducciones
+
+- `strings.json` y `translations/{en,es}.json` actualizados:
+
+  * Nuevo bloque `options.step.init` con `menu_options.cost_params`
+    y `menu_options.rotate_token`.
+  * Renombrado el antiguo `options.step.init` (formulario tarifa) a
+    `options.step.cost_params`. Mismas claves de campo y
+    descripciones — solo cambia el `step_id`.
+  * Nuevo bloque `options.step.rotate_token` con título y
+    descripción larga explicando consecuencias e implicaciones.
+  * Añadidas las entradas faltantes `services.clear_cost_stats`
+    (v0.5.15) y `services.reset_meter` (v0.5.16) en ambos
+    ficheros de traducción — antes solo estaban en `strings.json`,
+    así que los usuarios con HA en español o inglés veían los
+    nombres por defecto sin localizar.
+
 ## [0.5.17] — 2026-04-26
 
 ### Añadido
