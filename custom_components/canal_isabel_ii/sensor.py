@@ -37,6 +37,7 @@ from homeassistant.util.unit_conversion import VolumeConverter
 from .attribute_helpers import (
     TimedReading,
     data_age_minutes,
+    sum_for_local_bimonth,
     sum_for_local_day,
     sum_for_rolling_window,
 )
@@ -705,14 +706,25 @@ class _CostSensorMixin:
 
         Used to decide which tariff block the next m³ would fall into,
         which drives both the current-block and current-price sensors.
+
+        Bug 2.3 (v0.5.14): the comparison runs in **local civil time**.
+        ``r.timestamp`` may be naive (provider quirk) or UTC-aware (most
+        common after the recorder round-trips); calling ``.date()``
+        directly on a UTC-aware timestamp returns the UTC date, which
+        on a bimonth-boundary hour (e.g. 2026-01-01 00:30 Madrid local
+        = 2025-12-31 23:30 UTC) used to land the reading in the wrong
+        bimonth and freeze the current-block sensor for a few hours.
+        ``sum_for_local_bimonth`` does the conversion explicitly.
         """
         now = dt_util.now()
         b_start, b_end = bimonth_for(now.date())
-        total_l = 0.0
-        for r in self._rows():
-            ts = r.timestamp
-            if b_start <= ts.date() < b_end:
-                total_l += r.liters
+        rows = [TimedReading(timestamp=r.timestamp, liters=r.liters) for r in self._rows()]
+        total_l = sum_for_local_bimonth(
+            rows,
+            bimonth_start=b_start,
+            bimonth_end=b_end,
+            local_tz=dt_util.DEFAULT_TIME_ZONE,
+        )
         return total_l / 1000.0
 
 

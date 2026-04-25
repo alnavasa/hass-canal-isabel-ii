@@ -3,6 +3,36 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.14] — 2026-04-25
+
+### Arreglado
+
+- **El sensor `Bloque tarifario actual` ya no se queda colgado en el
+  bimestre anterior durante las primeras horas del cambio de
+  bimestre.** `_bimonth_consumo_m3` (la función que decide qué
+  bloque tarifario está en curso para `precio_actual` y
+  `bloque_tarifario_actual`) llamaba a `r.timestamp.date()` sobre cada
+  lectura sin normalizar la zona horaria. Para un timestamp UTC-aware
+  (lo más común tras el round-trip por el recorder), `.date()`
+  devuelve la fecha **UTC**, no la fecha civil de Madrid. En la
+  primera hora civil de un nuevo bimestre — por ejemplo `2026-01-01
+  00:30 Madrid local`, que en UTC es `2025-12-31 23:30` — el
+  contador se asignaba al bimestre equivocado, y la entidad anunciaba
+  un consumo del bimestre que ya no era el actual hasta que pasaba la
+  primera hora UTC del nuevo bimestre.
+
+  Solución: nuevo helper puro `sum_for_local_bimonth` en
+  `attribute_helpers.py` que convierte cada timestamp a la zona horaria
+  local antes de comparar contra los límites del bimestre. Mantiene la
+  misma convención que el resto del módulo (timestamp naïve → asumido
+  como local, timestamp aware → `astimezone(local_tz)`). Cubierto por
+  7 nuevos tests, incluyendo el caso exacto del cambio invierno/verano
+  con CEST.
+
+  Sin cambios funcionales en el resto del integrador: las
+  estadísticas de largo plazo y el sensor `Coste acumulado` ya
+  normalizaban a local explícitamente.
+
 ## [0.5.13] — 2026-04-25
 
 ### Añadido

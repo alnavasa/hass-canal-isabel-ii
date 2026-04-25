@@ -41,6 +41,7 @@ _helpers = _load_helper_module()
 TimedReading = _helpers.TimedReading
 sum_for_local_day = _helpers.sum_for_local_day
 sum_for_rolling_window = _helpers.sum_for_rolling_window
+sum_for_local_bimonth = _helpers.sum_for_local_bimonth
 data_age_minutes = _helpers.data_age_minutes
 
 
@@ -191,3 +192,134 @@ class TestDataAgeMinutes:
         now = datetime(2026, 1, 15, 12, 1, 29, tzinfo=UTC)
         last = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
         assert data_age_minutes(last, now=now) == 1
+
+
+# =====================================================================
+# sum_for_local_bimonth
+# =====================================================================
+#
+# Bug 2.3 (v0.5.14): the previous inline ``_bimonth_consumo_m3``
+# called ``r.timestamp.date()`` directly. For UTC-aware timestamps
+# that's the UTC date — wrong on the bimonth-boundary hours, where
+# Madrid local and UTC straddle different calendar dates. These tests
+# pin the **local civil time** semantics and would fail on the old
+# implementation.
+
+
+class TestSumForLocalBimonth:
+    # Jan-Feb 2026 bimonth as a fixed reference window.
+    JAN_FEB = (datetime(2026, 1, 1).date(), datetime(2026, 3, 1).date())
+    # Nov-Dec 2025 bimonth.
+    NOV_DEC = (datetime(2025, 11, 1).date(), datetime(2026, 1, 1).date())
+
+    def test_empty_returns_zero_not_none(self):
+        # Unlike sum_for_local_day (None for empty), this helper
+        # always returns 0.0 — the block-current sensor wants a
+        # deterministic zero on first install, not an absent attribute
+        # that would silently disable downstream computations.
+        b_start, b_end = self.JAN_FEB
+        assert (
+            sum_for_local_bimonth(
+                [], bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 0.0
+        )
+
+    def test_utc_aware_at_local_bimonth_start_counts_in_new_bimonth(self):
+        # 2026-01-01 00:30 Madrid local = 2025-12-31 23:30 UTC.
+        # Old code: ``ts.date() == 2025-12-31`` → counted in Nov-Dec.
+        # Fix: convert to local first → counted in Jan-Feb.
+        b_start, b_end = self.JAN_FEB
+        rows = [TimedReading(datetime(2025, 12, 31, 23, 30, tzinfo=UTC), 17.0)]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 17.0
+        )
+
+    def test_utc_aware_at_local_bimonth_start_not_counted_in_old_bimonth(self):
+        # Mirror of the previous test: the same reading must NOT
+        # double-count by also showing up in the old bimonth.
+        b_start, b_end = self.NOV_DEC
+        rows = [TimedReading(datetime(2025, 12, 31, 23, 30, tzinfo=UTC), 17.0)]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 0.0
+        )
+
+    def test_local_civil_endpoints_half_open(self):
+        # 2026-01-01 00:00 local — first second of the new bimonth, IN.
+        # 2026-03-01 00:00 local — first second of the next bimonth, OUT
+        # (half-open interval).
+        b_start, b_end = self.JAN_FEB
+        rows = [
+            # 00:00 local on Jan 1 = 2025-12-31 23:00 UTC — IN
+            TimedReading(datetime(2025, 12, 31, 23, 0, tzinfo=UTC), 1.0),
+            # 23:59 local on Feb 28 = 22:59 UTC — IN
+            TimedReading(datetime(2026, 2, 28, 22, 59, tzinfo=UTC), 2.0),
+            # 00:00 local on Mar 1 = 2026-02-28 23:00 UTC — OUT
+            TimedReading(datetime(2026, 2, 28, 23, 0, tzinfo=UTC), 4.0),
+        ]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 3.0
+        )
+
+    def test_naive_timestamp_treated_as_local(self):
+        # Same fallback as sum_for_local_day: a naive datetime is
+        # interpreted as local civil time, never as UTC.
+        b_start, b_end = self.JAN_FEB
+        rows = [
+            # Naive 2026-01-15 12:00 → local Jan 15 → IN
+            TimedReading(datetime(2026, 1, 15, 12, 0), 100.0),
+            # Naive 2025-12-31 12:00 → local Dec 31 → OUT
+            TimedReading(datetime(2025, 12, 31, 12, 0), 200.0),
+        ]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 100.0
+        )
+
+    def test_summer_offset_bimonth_boundary(self):
+        # Jul-Aug bimonth with Madrid in CEST (UTC+2). The boundary
+        # 2026-07-01 00:00 local = 2026-06-30 22:00 UTC. A reading
+        # at 22:30 UTC on June 30 is 00:30 local on July 1 → in
+        # Jul-Aug.
+        jul_aug = (datetime(2026, 7, 1).date(), datetime(2026, 9, 1).date())
+        b_start, b_end = jul_aug
+        rows = [
+            # 2026-06-30 22:30 UTC = 2026-07-01 00:30 CEST → IN
+            TimedReading(datetime(2026, 6, 30, 22, 30, tzinfo=UTC), 8.0),
+            # 2026-06-30 21:30 UTC = 2026-06-30 23:30 CEST → OUT
+            TimedReading(datetime(2026, 6, 30, 21, 30, tzinfo=UTC), 16.0),
+        ]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_SUMMER
+            )
+            == 8.0
+        )
+
+    def test_only_current_bimonth_rows_counted(self):
+        # Mixed cache spanning multiple bimonths: only Jan-Feb 2026
+        # ones are summed.
+        b_start, b_end = self.JAN_FEB
+        rows = [
+            TimedReading(datetime(2025, 11, 15, 12, 0, tzinfo=UTC), 999.0),  # Nov-Dec — OUT
+            TimedReading(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), 5.0),  # IN
+            TimedReading(datetime(2026, 2, 20, 10, 0, tzinfo=UTC), 7.0),  # IN
+            TimedReading(datetime(2026, 3, 5, 10, 0, tzinfo=UTC), 999.0),  # Mar-Apr — OUT
+        ]
+        assert (
+            sum_for_local_bimonth(
+                rows, bimonth_start=b_start, bimonth_end=b_end, local_tz=MADRID_WINTER
+            )
+            == 12.0
+        )
