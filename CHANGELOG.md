@@ -3,6 +3,30 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.8] — 2026-04-25
+
+### Cambiado
+
+- **Default sensato para `Cuota suplementaria de alcantarillado`**:
+  pasa de `0.0` a `0.1002 €/m³`. El valor `0.0` solo es correcto en
+  los pocos municipios que no cobran esta cuota; para la mayoría de
+  los que sirve Canal de Isabel II el rango típico está entre
+  `0.05` y `0.15 €/m³` (vigencia 2026). Con un default razonable, los
+  usuarios que activen el cálculo de coste sin haber consultado aún
+  su factura ven un importe estimado mucho más cercano al real desde
+  el primer momento, en lugar de ver la cuota suplementaria a cero.
+  Quien quiera el comportamiento anterior puede ponerlo a `0` en el
+  Options flow tras la instalación.
+
+### Interno
+
+- `.gitignore` añade exclusiones para sidecars de macOS
+  (`._*`, `.AppleDouble/`, `.Spotlight-V100`, `.Trashes`) que algunos
+  workflows de desarrollo (copia vía Samba/SMB hacia el host de Home
+  Assistant) generan automáticamente. Defensa en profundidad — la
+  historia del repo ya estaba limpia, esto previene futuras coladas
+  por error.
+
 ## [0.5.7] — 2026-04-25
 
 ### Cambiado

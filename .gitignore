@@ -12,6 +12,11 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+# macOS AppleDouble sidecars (auto-creados al copiar a Samba/SMB/ext4)
+._*
+.AppleDouble/
+.Spotlight-V100
+.Trashes
 
 # Secrets — never commit
 .env

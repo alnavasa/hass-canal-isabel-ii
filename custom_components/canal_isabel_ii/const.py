@@ -89,9 +89,17 @@ DEFAULT_NAME = "Canal de Isabel II"
 #: Sensible Doméstico 1-vivienda defaults — cover the "I checked the
 #: enable_cost box but haven't read my bill yet" path with a
 #: configuration that produces a plausible ballpark cost.
+#:
+#: ``DEFAULT_CUOTA_SUPL_ALC`` corresponds to a value in the typical
+#: range of the supplementary sewer fees billed across municipalities
+#: served by Canal de Isabel II (most of them between ``0.05`` and
+#: ``0.15 €/m³`` for the 2026 vigencia). Picking a non-zero default
+#: yields a more realistic ballpark in the Energy panel for the user
+#: who hasn't fetched their bill yet — they can refine via the Options
+#: flow once they do.
 DEFAULT_DIAMETRO_MM = 15
 DEFAULT_N_VIVIENDAS = 1
-DEFAULT_CUOTA_SUPL_ALC = 0.0
+DEFAULT_CUOTA_SUPL_ALC = 0.1002
 DEFAULT_IVA_PCT = 10.0
 
 #: Coordinator tick interval. The ingest endpoint pokes the
