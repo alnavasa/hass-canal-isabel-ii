@@ -38,13 +38,32 @@ from .attribute_helpers import (
     sum_for_local_day,
     sum_for_rolling_window,
 )
-from .const import CONF_NAME, DEFAULT_NAME, DOMAIN, STATISTICS_SOURCE
+from .const import (
+    CONF_CUOTA_SUPL_ALC,
+    CONF_DIAMETRO_MM,
+    CONF_ENABLE_COST,
+    CONF_IVA_PCT,
+    CONF_N_VIVIENDAS,
+    CONF_NAME,
+    DEFAULT_NAME,
+    DOMAIN,
+    STATISTICS_SOURCE,
+)
 from .coordinator import CanalCoordinator
 from .models import MeterSummary, Reading
 from .statistics_helpers import (
     continuation_stats,
     merge_forward_and_backfill,
     needs_backfill,
+)
+from .tariff import (
+    TariffParams,
+    bimonth_for,
+    block_thresholds,
+    compute_hourly_cost_stream,
+    split_into_blocks,
+    variable_cost_eur,
+    vigencia_for,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,8 +90,10 @@ async def async_setup_entry(
       reloads and the three sensors per contract appear.
     * Subsequent clicks just refresh values (no reload).
     """
-    coordinator: CanalCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    cache = hass.data[DOMAIN][entry.entry_id]
+    coordinator: CanalCoordinator = cache["coordinator"]
     install_name = (entry.data.get(CONF_NAME) or entry.title or DEFAULT_NAME).strip()
+    cost_settings: dict[str, Any] = cache.get("cost") or {}
 
     contracts: dict[str, Reading] = {}
     for row in coordinator.data or []:
@@ -94,8 +115,39 @@ async def async_setup_entry(
             CanalCumulativeConsumptionSensor(coordinator, entry, install_name, contract)
         )
         entities.append(CanalMeterReadingSensor(coordinator, entry, install_name, contract))
+        if cost_settings.get(CONF_ENABLE_COST):
+            tariff_params = _tariff_params_from_settings(cost_settings)
+            currency = hass.config.currency or "EUR"
+            entities.append(
+                CanalCumulativeCostSensor(
+                    coordinator, entry, install_name, contract, tariff_params, currency
+                )
+            )
+            entities.append(
+                CanalCurrentPriceSensor(
+                    coordinator, entry, install_name, contract, tariff_params, currency
+                )
+            )
+            entities.append(
+                CanalCurrentBlockSensor(coordinator, entry, install_name, contract, tariff_params)
+            )
 
     async_add_entities(entities)
+
+
+def _tariff_params_from_settings(settings: dict[str, Any]) -> TariffParams:
+    """Build a :class:`TariffParams` from the cached entry settings.
+
+    The cache dict is built by ``__init__._resolve_cost_settings`` and
+    always has the four keys with sensible defaults, so this never
+    raises on missing fields.
+    """
+    return TariffParams(
+        diametro_mm=int(settings[CONF_DIAMETRO_MM]),
+        n_viviendas=int(settings[CONF_N_VIVIENDAS]),
+        cuota_supl_alc_eur_m3=float(settings[CONF_CUOTA_SUPL_ALC]),
+        iva_pct=float(settings[CONF_IVA_PCT]),
+    )
 
 
 class _ContractSensor(CoordinatorEntity[CanalCoordinator], SensorEntity):
@@ -122,11 +174,11 @@ class _ContractSensor(CoordinatorEntity[CanalCoordinator], SensorEntity):
         self._contract_id = contract_id
         self._entry_id = entry.entry_id
         self._install_name = install_name
-        # Group entities under a Device so the user sees "Casa Las
-        # Rozas" in the device page with the sensors below it.
-        # ``identifiers`` must be stable for the lifetime of this
-        # contract — the contract id is the natural choice (the
-        # user-facing label can change).
+        # Group entities under a Device so the user sees their chosen
+        # installation label (e.g. "Casa principal") in the device
+        # page with the sensors below it. ``identifiers`` must be
+        # stable for the lifetime of this contract — the contract id
+        # is the natural choice (the user-facing label can change).
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_{contract_id}")},
             name=install_name,
@@ -584,3 +636,373 @@ class CanalMeterReadingSensor(_ContractSensor, RestoreSensor):
             if summary.raw_reading:
                 attrs["raw_reading"] = summary.raw_reading
         return attrs
+
+
+# =====================================================================
+# Cost sensors (opt-in via the ``enable_cost`` config-flow checkbox)
+# =====================================================================
+#
+# All three sensors below share a TariffParams instance built once at
+# entity-creation time. If the user edits the cost params via the
+# OptionsFlow, ``__init__._async_update_listener`` reloads the entry
+# entirely so these entities are torn down and re-created with fresh
+# params — there's no in-place param swap.
+#
+# The cost sensors do NOT contribute to the consumption-side
+# external statistics (``canal_isabel_ii:consumption_<contract>``).
+# They publish their own ``canal_isabel_ii:cost_<contract>`` series so
+# the Energy panel can chart cost separately from m³.
+
+
+class _CostSensorMixin:
+    """Shared params + helpers for the three cost sensors.
+
+    Every cost sensor needs the same TariffParams + a way to look at
+    the current bimonth's accumulated m³, so we factor that here. Not
+    a full base class because we still inherit from ``_ContractSensor``
+    for the device-grouping + contract-row helpers.
+    """
+
+    _params: TariffParams
+
+    def _bimonth_consumo_m3(self: _ContractSensor) -> float:  # type: ignore[misc]
+        """Sum of m³ already consumed in the current calendar bimonth.
+
+        Used to decide which tariff block the next m³ would fall into,
+        which drives both the current-block and current-price sensors.
+        """
+        now = dt_util.now()
+        b_start, b_end = bimonth_for(now.date())
+        total_l = 0.0
+        for r in self._rows():
+            ts = r.timestamp
+            if b_start <= ts.date() < b_end:
+                total_l += r.liters
+        return total_l / 1000.0
+
+
+class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin):
+    """Running cost (€) for a contract — feeds the Energy panel.
+
+    Parallels :class:`CanalCumulativeConsumptionSensor` but for money:
+    same RestoreSensor pattern (state survives restarts), same
+    long-term-statistics push pattern (so the Energy panel's "Money
+    tracking" mode picks it up). The numeric series is built by
+    :func:`compute_hourly_cost_stream`, which:
+
+    - groups the cached readings by calendar bimonth,
+    - prices each one against the right vigencia,
+    - distributes cuota fija evenly across the period's hours,
+    - emits a monotone cumulative-€ stream suitable for
+      ``state_class=total_increasing``.
+
+    The state value (``native_value``) is the most recent
+    ``cumulative_eur`` from that stream — i.e. "total € spent so far",
+    matching what HA shows on the entity card.
+    """
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:cash"
+    _attr_translation_key = "cumulative_cost"
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        coordinator: CanalCoordinator,
+        entry: ConfigEntry,
+        install_name: str,
+        contract_id: str,
+        params: TariffParams,
+        currency: str,
+    ) -> None:
+        super().__init__(coordinator, entry, install_name, contract_id)
+        self._params = params
+        self._attr_native_unit_of_measurement = currency
+        self._attr_name = "Coste acumulado"
+        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_cumulative_cost"
+        self._restored_value: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last and last.native_value is not None:
+            try:
+                self._restored_value = float(last.native_value)
+            except (TypeError, ValueError):
+                self._restored_value = None
+        self._handle_coordinator_update()
+
+    def _cost_stream(self) -> list:
+        """Compute the full cost stream for this contract from the cache."""
+        rows = self._sorted_rows()
+        if not rows:
+            return []
+        local_tz = dt_util.DEFAULT_TIME_ZONE
+        timed: list[tuple[datetime, float]] = []
+        for r in rows:
+            ts = r.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=local_tz)
+            timed.append((ts, r.liters))
+        return compute_hourly_cost_stream(timed, self._params)
+
+    @property
+    def native_value(self) -> float | None:
+        stream = self._cost_stream()
+        if not stream:
+            return self._restored_value
+        latest = stream[-1].cumulative_eur
+        if self._restored_value is not None and latest < self._restored_value - 0.01:
+            # Same rationale as the consumption sensor: a cache wipe
+            # would otherwise look like a meter reset to
+            # TOTAL_INCREASING.
+            _LOGGER.warning(
+                "Cumulative cost dropped (%.2f → %.2f); keeping previous value",
+                self._restored_value,
+                latest,
+            )
+            return self._restored_value
+        self._restored_value = latest
+        return round(latest, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "contract": self._contract_id,
+            "diametro_mm": self._params.diametro_mm,
+            "n_viviendas": self._params.n_viviendas,
+            "cuota_supl_alc_eur_m3": self._params.cuota_supl_alc_eur_m3,
+            "iva_pct": self._params.iva_pct,
+        }
+        return attrs
+
+    def _handle_coordinator_update(self) -> None:
+        # Fire-and-forget — the state value above doesn't depend on
+        # the recorder push completing.
+        self.hass.async_create_task(self._push_cost_statistics())
+        super()._handle_coordinator_update()
+
+    async def _push_cost_statistics(self) -> None:
+        """Push the cumulative-cost stream to long-term statistics so
+        the Energy panel can chart cost over time.
+
+        Mirrors :meth:`CanalCumulativeConsumptionSensor._push_statistics`
+        — same get_last + delta strategy, just with €/cost instead of
+        liters. Backfill semantics are identical: any timestamp at or
+        before the last stored ``start`` triggers a full replay.
+        """
+        stream = self._cost_stream()
+        if not stream:
+            return
+
+        statistic_id = f"{STATISTICS_SOURCE}:cost_{self._contract_id}"
+        currency = self._attr_native_unit_of_measurement or "EUR"
+        metadata = StatisticMetaData(
+            source=STATISTICS_SOURCE,
+            statistic_id=statistic_id,
+            has_sum=True,
+            name=f"{self._install_name} - Canal de Isabel II coste",
+            unit_of_measurement=currency,
+            mean_type=StatisticMeanType.NONE,
+            unit_class=None,
+        )
+
+        recorder = get_recorder_instance(self.hass)
+        last_stats = await recorder.async_add_executor_job(
+            get_last_statistics,
+            self.hass,
+            1,
+            statistic_id,
+            True,
+            {"sum"},
+        )
+        last_sum = 0.0
+        last_start: datetime | None = None
+        if last_stats and statistic_id in last_stats and last_stats[statistic_id]:
+            entry = last_stats[statistic_id][0]
+            last_sum = float(entry.get("sum") or 0.0)
+            raw_start = entry.get("start") or entry.get("end")
+            if isinstance(raw_start, (int, float)):
+                last_start = dt_util.utc_from_timestamp(float(raw_start))
+            elif raw_start is not None:
+                last_start = dt_util.parse_datetime(str(raw_start))
+
+        # Convert cumulative stream into (utc_ts, cumulative_eur) pairs
+        # ordered chronologically — same shape the consumption push
+        # uses, just the per-hour value is € instead of liters.
+        items: list[tuple[datetime, float]] = []
+        for hc in stream:
+            ts = hc.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            items.append((ts.astimezone(dt_util.UTC), hc.cumulative_eur))
+
+        # The cost stream is *already* a running total — we store
+        # ``state=running, sum=running`` directly without a continuation
+        # offset. If a backfill is detected we replay everything; if
+        # not, we filter forward-only items.
+        if needs_backfill([(ts, 0.0) for ts, _ in items], last_start):
+            stats = [StatisticData(start=ts, state=running, sum=running) for ts, running in items]
+            _LOGGER.info(
+                "%s: backfill — replaying %d hourly cost stats",
+                statistic_id,
+                len(stats),
+            )
+            async_add_external_statistics(self.hass, metadata, stats)
+            return
+
+        new_items = [
+            (ts, running) for ts, running in items if last_start is None or ts > last_start
+        ]
+        if not new_items:
+            _LOGGER.debug(
+                "%s: no new hourly cost rows to import (last_start=%s)",
+                statistic_id,
+                last_start,
+            )
+            return
+
+        stats = [StatisticData(start=ts, state=running, sum=running) for ts, running in new_items]
+        _LOGGER.debug(
+            "%s: importing %d new hourly cost stats (last_sum=%.2f)",
+            statistic_id,
+            len(stats),
+            last_sum,
+        )
+        async_add_external_statistics(self.hass, metadata, stats)
+
+
+class CanalCurrentPriceSensor(_ContractSensor, _CostSensorMixin):
+    """€/m³ that the *next* m³ would cost — sum of all four services'
+    block prices for the current bimonth's block, plus IVA + the
+    suplementaria.
+
+    Useful for templates ("how much does running the dishwasher
+    cost?") and for the Energy panel's "Use a price entity" mode if
+    the user prefers a live €/m³ rate over total-cost statistics.
+
+    The block changes when consumption crosses each prorated threshold
+    within a bimonth, which is why this sensor is stateless w.r.t.
+    history — it always reflects the price for the *next* m³ given
+    the cache's current bimonth-to-date total.
+    """
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cash-clock"
+    _attr_translation_key = "current_price"
+    _attr_suggested_display_precision = 4
+
+    def __init__(
+        self,
+        coordinator: CanalCoordinator,
+        entry: ConfigEntry,
+        install_name: str,
+        contract_id: str,
+        params: TariffParams,
+        currency: str,
+    ) -> None:
+        super().__init__(coordinator, entry, install_name, contract_id)
+        self._params = params
+        # HA doesn't have a currency/m³ enum — concatenate so the UI
+        # shows e.g. "EUR/m³". Some unit converters may complain; we
+        # accept that in exchange for an obvious unit string.
+        self._attr_native_unit_of_measurement = f"{currency}/m³"
+        self._attr_name = "Precio actual"
+        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_price"
+
+    @property
+    def native_value(self) -> float | None:
+        now = dt_util.now()
+        try:
+            ts = vigencia_for(now.date())
+        except ValueError:
+            return None
+        consumo_m3 = self._bimonth_consumo_m3()
+        b_start, b_end = bimonth_for(now.date())
+        dp_days = (b_end - b_start).days
+        # Price the very next 1 m³ to figure out the marginal block
+        # price. Cheaper than reverse-engineering split_into_blocks.
+        before = variable_cost_eur(consumo_m3, dp_days, ts)
+        after = variable_cost_eur(consumo_m3 + 1.0, dp_days, ts)
+        marginal = after - before  # € for that extra m³ pre-IVA-pre-supl
+        with_supl = marginal + self._params.cuota_supl_alc_eur_m3
+        with_iva = with_supl * (1.0 + self._params.iva_pct / 100.0)
+        return round(with_iva, 4)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "contract": self._contract_id,
+            "bimonth_consumo_m3": round(self._bimonth_consumo_m3(), 3),
+        }
+
+
+class CanalCurrentBlockSensor(_ContractSensor, _CostSensorMixin):
+    """Which of Canal's four tariff blocks the *next* m³ would land in.
+
+    State is an int 1..4. Goes hand-in-hand with the price sensor —
+    when this rolls from 1 to 2, the price entity jumps to the B2 rate.
+
+    Block thresholds are prorated by the bimonth's actual length (60
+    days for a calendar bimonth, but :func:`block_thresholds` accepts
+    any DP if the user is on a shifted cycle in the future).
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:format-list-numbered"
+    _attr_translation_key = "current_block"
+    # Override the L unit inherited from _ContractSensor — block is a
+    # dimensionless integer from 1 to 4.
+    _attr_native_unit_of_measurement = None
+
+    def __init__(
+        self,
+        coordinator: CanalCoordinator,
+        entry: ConfigEntry,
+        install_name: str,
+        contract_id: str,
+        params: TariffParams,
+    ) -> None:
+        super().__init__(coordinator, entry, install_name, contract_id)
+        self._params = params
+        self._attr_name = "Bloque tarifario actual"
+        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_block"
+
+    @property
+    def native_value(self) -> int | None:
+        now = dt_util.now()
+        b_start, b_end = bimonth_for(now.date())
+        dp_days = (b_end - b_start).days
+        consumo_m3 = self._bimonth_consumo_m3()
+        u1, u2, u3 = block_thresholds(dp_days)
+        if consumo_m3 < u1:
+            return 1
+        if consumo_m3 < u2:
+            return 2
+        if consumo_m3 < u3:
+            return 3
+        return 4
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        now = dt_util.now()
+        b_start, b_end = bimonth_for(now.date())
+        dp_days = (b_end - b_start).days
+        u1, u2, u3 = block_thresholds(dp_days)
+        consumo_m3 = self._bimonth_consumo_m3()
+        b1, b2, b3, b4 = split_into_blocks(consumo_m3, dp_days)
+        return {
+            "contract": self._contract_id,
+            "bimonth_consumo_m3": round(consumo_m3, 3),
+            "block_1_threshold_m3": round(u1, 3),
+            "block_2_threshold_m3": round(u2, 3),
+            "block_3_threshold_m3": round(u3, 3),
+            "consumed_in_block_1_m3": round(b1, 3),
+            "consumed_in_block_2_m3": round(b2, 3),
+            "consumed_in_block_3_m3": round(b3, 3),
+            "consumed_in_block_4_m3": round(b4, 3),
+            "bimonth_start": b_start.isoformat(),
+            "bimonth_end": b_end.isoformat(),
+        }

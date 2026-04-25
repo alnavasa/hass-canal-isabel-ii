@@ -156,10 +156,10 @@ class TestParseCsv:
         raw = (
             "Contrato;Periodo;Contador;Dirección;Frecuencia;Fecha/Hora;Consumo (litros)\n"
             "999000001;F;M1;A1;Horaria;22/04/2026 03;5\n"
-            "410270591;F;M2;A2;Horaria;22/04/2026 03;7\n"
+            "999000002;F;M2;A2;Horaria;22/04/2026 03;7\n"
         )
         rows = parse_csv(raw)
-        assert {r.contract for r in rows} == {"999000001", "410270591"}
+        assert {r.contract for r in rows} == {"999000001", "999000002"}
 
     def test_metadata_carried_over(self):
         rows = parse_csv(CSV_SEMICOLON)

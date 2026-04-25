@@ -36,6 +36,7 @@ Wizard, in plain words:
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -50,7 +51,21 @@ from .bookmarklet import (
     format_install_notification,
 )
 from .bookmarklet_view import CanalBookmarkletPageView
-from .const import CONF_HA_URL, CONF_NAME, CONF_TOKEN, DOMAIN
+from .const import (
+    CONF_CUOTA_SUPL_ALC,
+    CONF_DIAMETRO_MM,
+    CONF_ENABLE_COST,
+    CONF_HA_URL,
+    CONF_IVA_PCT,
+    CONF_N_VIVIENDAS,
+    CONF_NAME,
+    CONF_TOKEN,
+    DEFAULT_CUOTA_SUPL_ALC,
+    DEFAULT_DIAMETRO_MM,
+    DEFAULT_IVA_PCT,
+    DEFAULT_N_VIVIENDAS,
+    DOMAIN,
+)
 from .coordinator import CanalCoordinator
 from .ingest import CanalIngestView
 from .store import ReadingStore
@@ -194,11 +209,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # here so the view doesn't have to scan ``hass.config_entries``
         # on every request.
         "token": entry.data.get("token", ""),
+        # Cost-feature merged settings (data ⊕ options) so sensor.py
+        # can read them without re-doing the merge on every refresh.
+        # OptionsFlow writes to ``entry.options``; the wizard wrote to
+        # ``entry.data``. Options win when both are present.
+        "cost": _resolve_cost_settings(entry),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    # Listen for option/data updates so a token rotation or rename
-    # propagates to the cached value above without an HA restart.
+    # Listen for option/data updates so a token rotation, rename, or
+    # cost-params edit propagates to the cached value above without an
+    # HA restart. Cost-params changes also trigger a full entry reload
+    # so sensors get torn down / created to match the new state (see
+    # ``_async_update_listener``).
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     # First-time setup: the entry has no bound contract yet. Publish the
@@ -212,13 +235,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+def _resolve_cost_settings(entry: ConfigEntry) -> dict[str, Any]:
+    """Merge cost params from ``entry.data`` (wizard) with ``entry.options``
+    (OptionsFlow). Options win when both are present.
+
+    Always returns the full dict (with defaults) regardless of whether
+    the cost feature is enabled, so sensors can branch on
+    ``settings["enable_cost"]`` and never deal with missing keys.
+    """
+    merged: dict[str, Any] = {**entry.data, **entry.options}
+    return {
+        CONF_ENABLE_COST: bool(merged.get(CONF_ENABLE_COST, False)),
+        CONF_DIAMETRO_MM: int(merged.get(CONF_DIAMETRO_MM, DEFAULT_DIAMETRO_MM)),
+        CONF_N_VIVIENDAS: int(merged.get(CONF_N_VIVIENDAS, DEFAULT_N_VIVIENDAS)),
+        CONF_CUOTA_SUPL_ALC: float(merged.get(CONF_CUOTA_SUPL_ALC, DEFAULT_CUOTA_SUPL_ALC)),
+        CONF_IVA_PCT: float(merged.get(CONF_IVA_PCT, DEFAULT_IVA_PCT)),
+    }
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Refresh the cached token + name when the entry data changes."""
+    """Refresh cached settings when the entry data/options change.
+
+    Token + name updates are absorbed in place (no reload needed).
+    Cost-feature changes trigger a full reload so the sensor platform
+    re-runs ``async_setup_entry`` and creates/destroys cost entities
+    to match the new state.
+    """
     cache = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if not cache:
         return
     cache["token"] = entry.data.get("token", "")
     cache["name"] = entry.data.get(CONF_NAME) or entry.title or ""
+    new_cost = _resolve_cost_settings(entry)
+    if new_cost != cache.get("cost"):
+        cache["cost"] = new_cost
+        # Cost-feature toggled or params changed — full reload so
+        # sensor.py re-evaluates which entities should exist.
+        await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

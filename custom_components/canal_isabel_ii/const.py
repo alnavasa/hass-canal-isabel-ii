@@ -36,10 +36,56 @@ CONF_CONTRACT = "contract"
 CONF_HA_URL = "ha_url"
 
 # ---------------------------------------------------------------------
+# Cost feature (opt-in via config flow)
+# ---------------------------------------------------------------------
+
+#: Whether this entry should compute and publish cost-derived entities
+#: (cumulative cost, current price, current block) on top of the
+#: consumption ones. Defaults to False — users who only care about m³
+#: pay zero overhead. Toggleable later via the options flow.
+CONF_ENABLE_COST = "enable_cost"
+
+#: Caliber of the meter in millimetres. Drives the cuota-fija formula
+#: (``D²`` term in aducción / distribución). Doméstico contracts in
+#: Madrid usually have a 13 or 15 mm meter; bigger calibres exist for
+#: communal installations or large unifamiliar houses.
+CONF_DIAMETRO_MM = "diametro_mm"
+
+#: Number of dwellings served by this contract. ``N`` in the cuota-fija
+#: formulas. Almost always 1 for a single-family installation; communal
+#: contracts (a vertical of flats sharing one contador) plug in the
+#: actual number.
+CONF_N_VIVIENDAS = "n_viviendas"
+
+#: Cuota suplementaria de alcantarillado in €/m³. Each municipio in
+#: the Comunidad de Madrid sets its own rate, so it differs per
+#: contract and sometimes between vigencias. Defaults to 0.0 so a
+#: user who hasn't looked at their bill yet still gets a reasonable
+#: lower-bound cost estimate; the real value is on the bill labelled
+#: "Cuota suplementaria de alcantarillado".
+CONF_CUOTA_SUPL_ALC = "cuota_supl_alc_eur_m3"
+
+#: IVA percentage applied to the entire bill. 10 % nationally for
+#: water in Spain — exposed as a config so a user who has a different
+#: legal regime (or who wants to switch to the future 21 % rate if
+#: water ever loses its reduced-VAT status) can update without an
+#: integration release.
+CONF_IVA_PCT = "iva_pct"
+
+
+# ---------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------
 
 DEFAULT_NAME = "Canal de Isabel II"
+
+#: Sensible Doméstico 1-vivienda defaults — cover the "I checked the
+#: enable_cost box but haven't read my bill yet" path with a
+#: configuration that produces a plausible ballpark cost.
+DEFAULT_DIAMETRO_MM = 15
+DEFAULT_N_VIVIENDAS = 1
+DEFAULT_CUOTA_SUPL_ALC = 0.0
+DEFAULT_IVA_PCT = 10.0
 
 #: Coordinator tick interval. The ingest endpoint pokes the
 #: coordinator on every POST so live data arrives instantly; this slow

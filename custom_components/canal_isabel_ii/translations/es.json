@@ -6,11 +6,29 @@
         "description": "Esta integración recibe los datos de consumo por HTTP desde un *bookmarklet* (un favorito JavaScript) que pulsas en tu navegador cuando ya estás logueado en la Oficina Virtual.\n\nIntroduce un nombre para esta instalación y la URL HTTPS de tu Home Assistant (local o pública — ambas valen mientras sea HTTPS). Al confirmar se te enseñará el código del bookmarklet listo para pegar en una notificación persistente.",
         "data": {
           "name": "Nombre de la instalación",
-          "ha_url": "URL HTTPS de Home Assistant"
+          "ha_url": "URL HTTPS de Home Assistant",
+          "enable_cost": "Calcular precio (€) además del consumo (m³)"
         },
         "data_description": {
           "name": "Etiqueta legible para tus sensores y dispositivo (ej. \"Casa principal\"). El número de contrato sigue siendo el identificador interno y se vincula automáticamente la primera vez que pulsas el bookmarklet.",
-          "ha_url": "Por dónde llega el bookmarklet a tu HA. Puede ser una URL HTTPS local (IP o hostname de tu LAN) si vas a pulsar el bookmarklet siempre desde esa red, o una URL HTTPS pública (DuckDNS, Nabu Casa, Cloudflare Tunnel, etc.) si lo quieres usar desde cualquier sitio. Debe ser HTTPS en los dos casos — los navegadores bloquean HTTP cuando la página del portal es HTTPS. Por defecto: {default_url}."
+          "ha_url": "Por dónde llega el bookmarklet a tu HA. Puede ser una URL HTTPS local (IP o hostname de tu LAN) si vas a pulsar el bookmarklet siempre desde esa red, o una URL HTTPS pública (DuckDNS, Nabu Casa, Cloudflare Tunnel, etc.) si lo quieres usar desde cualquier sitio. Debe ser HTTPS en los dos casos — los navegadores bloquean HTTP cuando la página del portal es HTTPS. Por defecto: {default_url}.",
+          "enable_cost": "Si lo activas, se crearán entidades extra de coste (€ acumulado, precio actual €/m³, bloque tarifario actual) que pueden integrarse en el Panel de Energía. Si lo dejas desactivado, la integración se comporta como hasta ahora — solo entidades de consumo en m³."
+        }
+      },
+      "cost": {
+        "title": "Parámetros de tarifa",
+        "description": "Estos cuatro datos se necesitan para reproducir tu factura con un margen menor del 10 %. Si no los tienes a mano, deja los valores por defecto y ajústalos luego en \"Configurar\" de la integración cuando consultes una factura real.",
+        "data": {
+          "diametro_mm": "Calibre del contador (mm)",
+          "n_viviendas": "Número de viviendas",
+          "cuota_supl_alc_eur_m3": "Cuota suplementaria de alcantarillado (€/m³)",
+          "iva_pct": "IVA (%)"
+        },
+        "data_description": {
+          "diametro_mm": "Diámetro nominal del contador, lo verás en tu factura como \"Calibre\". Doméstico unifamiliar: típicamente 13 o 15. Comunal o gran consumo: 20, 25, 30 o más.",
+          "n_viviendas": "Cuántas viviendas alimenta este contador. Vivienda unifamiliar = 1. Comunidad de propietarios con un único contador = número de pisos.",
+          "cuota_supl_alc_eur_m3": "Lo establece tu municipio. Aparece en la factura como \"Cuota suplementaria de alcantarillado\". Si no la cobran en tu municipio, déjalo en 0,0.",
+          "iva_pct": "Porcentaje de IVA aplicado a la factura completa. Por defecto 10 %; cámbialo solo si tu régimen fiscal es distinto."
         }
       }
     },
@@ -20,6 +38,28 @@
     },
     "abort": {
       "reauth_not_supported": "No hay sesión en HA que caduque — los datos los aporta tu navegador vía bookmarklet. Si necesitas rotar el token, borra esta integración y vuelve a añadirla."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tarifa Canal de Isabel II",
+        "description": "Edita los parámetros que se usan para calcular el coste. También puedes desactivar la entidad de coste si ya no la necesitas — los sensores de consumo (m³) seguirán funcionando.",
+        "data": {
+          "enable_cost": "Calcular precio (€) además del consumo (m³)",
+          "diametro_mm": "Calibre del contador (mm)",
+          "n_viviendas": "Número de viviendas",
+          "cuota_supl_alc_eur_m3": "Cuota suplementaria de alcantarillado (€/m³)",
+          "iva_pct": "IVA (%)"
+        },
+        "data_description": {
+          "enable_cost": "Si lo desactivas, las entidades de coste desaparecen al recargar la integración (los sensores de m³ siguen igual).",
+          "diametro_mm": "Diámetro nominal del contador en tu factura (\"Calibre\"). Doméstico unifamiliar: 13 o 15.",
+          "n_viviendas": "Vivienda unifamiliar = 1. Comunidad con un único contador = número de pisos.",
+          "cuota_supl_alc_eur_m3": "El valor exacto está en tu factura, etiquetado \"Cuota suplementaria de alcantarillado\". 0,0 si tu municipio no la cobra.",
+          "iva_pct": "Porcentaje de IVA. Por defecto 10 %."
+        }
+      }
     }
   },
   "entity": {
@@ -32,6 +72,15 @@
       },
       "meter_reading": {
         "name": "Lectura del contador"
+      },
+      "cumulative_cost": {
+        "name": "Coste acumulado"
+      },
+      "current_price": {
+        "name": "Precio actual"
+      },
+      "current_block": {
+        "name": "Bloque tarifario actual"
       }
     }
   },

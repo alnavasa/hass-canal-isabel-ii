@@ -72,23 +72,55 @@ inconsistentes.
 Ya cubierto en [SETUP.md §4](SETUP.md#4-conectar-al-panel-de-energía-agua).
 Notas adicionales de uso:
 
-### Coste
+### Coste — desde v0.5.0 lo hace la integración
 
-El panel de Energía permite asociar un **precio** a cada consumo de
-agua. Tres opciones:
+A partir de v0.5.0 la integración trae **modelo de tarifa de Canal
+incluido** y publica entidades de coste opcionales. La forma
+recomendada de tener coste en el panel de Energía es:
 
-1. **Precio fijo €/m³** — ojo: Canal usa **tarifa por bloques** (tramo 1
-   barato hasta cierto consumo bimestral, tramo 2 medio, tramo 3
-   penalización). Un único precio fijo te dará una estimación pesimista
-   o demasiado optimista según tu volumen.
-2. **Sensor de precio** (`input_number` o template) — útil si quieres
-   modelar la tarifa por bloques (ver §5 abajo, "Cálculo de coste por
-   tramos").
-3. **Sin coste** — sólo agua bruta. Simplísimo, gráfica clara, y dejas
-   el coste para el repaso bimestral cuando llega la factura.
+1. *Ajustes → Dispositivos y servicios → Canal de Isabel II →
+   Configurar*.
+2. Marca **Calcular precio (€)** y rellena los 4 parámetros (calibre
+   del contador, nº viviendas, cuota suplementaria de alcantarillado
+   €/m³, IVA %). Los tres primeros vienen en tu factura; IVA por
+   defecto 10 %.
+3. Tras guardar, la integración crea 3 sensores nuevos por contrato:
+   - `sensor.<install>_coste_acumulado` — € acumulados, monotónico.
+   - `sensor.<install>_precio_actual` — €/m³ del próximo m³ (bloque
+     actual + IVA + suplementaria, sumando los 4 servicios).
+   - `sensor.<install>_bloque_tarifario_actual` — bloque 1-4 del
+     próximo m³.
+4. En el panel de Energía → Agua, opción **"Usa una entidad
+   rastreando el coste total"** y selecciona
+   `sensor.<install>_coste_acumulado`. Coste correcto por bloques,
+   con cuota fija prorrateada y vigencia 2025/2026 manejadas
+   automáticamente.
 
-> Recomendación: empieza sin coste. Cuando lleves dos facturas, calibra
-> el modelo de bloques (ver más abajo).
+> **Sigue funcionando "sin coste"**: si dejas la casilla sin marcar,
+> el panel de Energía → Agua muestra solo m³ y el resto del
+> comportamiento es idéntico a v0.4.x. Las opciones legacy *precio
+> fijo €/m³* o *sensor de precio template* del panel de Energía
+> también siguen funcionando, pero con la entidad de coste
+> built-in obtienes mejor precisión sin escribir templates.
+
+**Validación**: el modelo se ha calibrado contra dos facturas reales
+con < 1 % de desvío en ambos casos (alta consumición cruzando los
+cuatro bloques, y consumo bajo cruzando la frontera de vigencia
+01-01-2026). Si una nueva factura tuya se desvía > 10 %, abre un
+issue con la factura anonimizada.
+
+**Limitaciones del modelo en v0.5.0**:
+
+- Solo "Doméstico 1 vivienda". Industrial, comercial y comunidades
+  grandes tienen tablas distintas que aún no están encodificadas.
+- Los precios B2-B4 de la vigencia 2026 son **extrapolados** del
+  delta % de B1 (la única banda observada en facturas reales que
+  cruzan la frontera). Para usuarios con consumo < 20 m³ bimestral
+  da igual — solo ven B1. Cuando aparezca una factura con > 20 m³
+  posterior a 01-01-2026, se reemplazarán por valores reales.
+- Asume **bimestres naturales** (ene-feb, mar-abr, …, nov-dic). Si
+  tu ciclo de lectura está desfasado, los totales por bimestre serán
+  ligeramente inexactos pero el **total anual sigue siendo exacto**.
 
 ### Histórico el día 1
 
@@ -123,12 +155,12 @@ semana: el POST es upsert-seguro, no duplica datos.
 type: entities
 title: Agua — Casa
 entities:
-  - entity: sensor.mf1_lectura_del_contador
+  - entity: sensor.casa_lectura_del_contador
     name: Contador (m³)
-  - entity: sensor.mf1_consumo_ultima_hora
+  - entity: sensor.casa_consumo_ultima_hora
     name: Última hora publicada
     secondary_info: last-updated
-  - entity: sensor.mf1_consumo_periodo
+  - entity: sensor.casa_consumo_periodo
     name: Consumo cacheado
 ```
 
@@ -149,7 +181,7 @@ stat_types:
 > **Importante**: usa `canal_isabel_ii:consumption_<id>` como entity id
 > aunque no aparezca en el autocompletado. La tarjeta `statistics-graph`
 > acepta statistic_ids externos. Si lo dejas como entidad
-> (`sensor.mf1_consumo_periodo`), verás la curva monotónica del
+> (`sensor.casa_consumo_periodo`), verás la curva monotónica del
 > acumulado, no el consumo por hora.
 
 ### Comparativa día actual vs día anterior
@@ -169,7 +201,7 @@ stat_types:
 
 ```yaml
 type: gauge
-entity: sensor.mf1_consumo_ultima_hora
+entity: sensor.casa_consumo_ultima_hora
 min: 0
 max: 200       # litros — ajusta a tu hogar
 severity:
@@ -192,15 +224,15 @@ no funciona — `utility_meter` necesita una entidad. Hay dos rutas:
 # configuration.yaml
 utility_meter:
   agua_bimestral:
-    source: sensor.mf1_lectura_del_contador
+    source: sensor.casa_lectura_del_contador
     cycle: bimonthly
     offset:
       days: 0   # ajusta al día que arranca tu ciclo según factura
   agua_mensual:
-    source: sensor.mf1_lectura_del_contador
+    source: sensor.casa_lectura_del_contador
     cycle: monthly
   agua_diaria:
-    source: sensor.mf1_lectura_del_contador
+    source: sensor.casa_lectura_del_contador
     cycle: daily
 ```
 
@@ -222,33 +254,53 @@ no actualiza la lectura absoluta).
 
 ## 5. Cálculo de coste por tramos (Canal)
 
-Tarifa **bimestral 2026** (consulta tu factura — varía por municipio
-y bloques tarifarios). Estructura tipo (no es la real, es plantilla):
+> **Desde v0.5.0 esto lo hace la integración por ti**. Marca
+> *Calcular precio (€)* en la configuración de la integración (o vía
+> *Configurar* después) y obtienes los sensores
+> `sensor.<install>_coste_acumulado`,
+> `sensor.<install>_precio_actual` y
+> `sensor.<install>_bloque_tarifario_actual` con tarifa por **4
+> bloques**, **cuota fija** prorrateada al periodo, **cuota
+> suplementaria de alcantarillado** y **IVA**, partidos por vigencia
+> 2025/2026 cuando toca. Validado contra facturas reales con desvío
+> < 1 %.
 
-| Bloque | Rango (m³ bimestral) | Precio €/m³ |
-|--------|----------------------|-------------|
-| 1      | 0–22                 | 0,55        |
-| 2      | 22–66                | 1,10        |
-| 3      | 66+                  | 1,80        |
+Si necesitas más control que el que ofrecen los parámetros de la
+integración (p.ej. quieres modelar un escalón de coste distinto, o
+hacer un sensor de "lo que llevo gastado este bimestre" sin esperar
+al cierre del periodo), puedes seguir usando el approach manual:
 
-Plantilla:
+| Bloque | Rango (m³ bimestral) | Precio €/m³ aprox. (sin IVA, suma 4 servicios) |
+|--------|----------------------|------------------------------------------------|
+| B1     | 0–20                 | ~0,87                                          |
+| B2     | 20–40                | ~1,53                                          |
+| B3     | 40–60                | ~3,78                                          |
+| B4     | 60+                  | ~4,35                                          |
+
+(Valores 2025 — consulta tu factura para el año en vigor; los
+exactos están en `tariff.py`.)
+
+Plantilla manual de respaldo:
 
 ```yaml
 template:
   - sensor:
-      - name: "Coste agua bimestre actual"
+      - name: "Coste agua bimestre actual (manual)"
         unit_of_measurement: "EUR"
         device_class: monetary
         state: >-
           {% set m = states('sensor.agua_bimestral') | float(0) %}
-          {% set t1 = [m, 22] | min %}
-          {% set t2 = [[m - 22, 0] | max, 44] | min %}
-          {% set t3 = [m - 66, 0] | max %}
-          {{ (t1 * 0.55 + t2 * 1.10 + t3 * 1.80) | round(2) }}
+          {% set t1 = [m, 20] | min %}
+          {% set t2 = [[m - 20, 0] | max, 20] | min %}
+          {% set t3 = [[m - 40, 0] | max, 20] | min %}
+          {% set t4 = [m - 60, 0] | max %}
+          {{ ((t1 * 0.87 + t2 * 1.53 + t3 * 3.78 + t4 * 4.35) * 1.10) | round(2) }}
 ```
 
-Pruébalo en *Developer Tools → Templates* primero. Cuando coincide
-±5% con tu última factura, el modelo está bien calibrado.
+Recordatorio: la entidad built-in **`coste_acumulado`** ya incluye
+cuota fija + suplementaria + IVA y se publica como estadística
+externa (`canal_isabel_ii:cost_<contract>`) lista para el panel de
+Energía. La plantilla manual es solo para casos avanzados.
 
 ## 6. Automatizaciones útiles
 
@@ -267,14 +319,14 @@ condition:
     after: "02:00:00"
     before: "05:00:00"
   - condition: numeric_state
-    entity_id: sensor.mf1_consumo_ultima_hora
+    entity_id: sensor.casa_consumo_ultima_hora
     above: 30
 action:
   - service: notify.mobile_app_iphone
     data:
       title: "💧 Posible fuga"
       message: >-
-        Consumo nocturno {{ states('sensor.mf1_consumo_ultima_hora') }} L/h —
+        Consumo nocturno {{ states('sensor.casa_consumo_ultima_hora') }} L/h —
         revisa cisternas y riego.
 ```
 
@@ -327,7 +379,7 @@ action:
     target:
       entity_id: input_text.lectura_ultima_factura
     data:
-      value: "{{ states('sensor.mf1_lectura_del_contador') }}"
+      value: "{{ states('sensor.casa_lectura_del_contador') }}"
 ```
 
 Útil para detectar discrepancias entre lo que tú mides y lo que te

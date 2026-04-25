@@ -72,6 +72,7 @@ El asistente pide:
 |--------------------------|-------------------------------------------------------------------------------------------------|-----------------------------------------------|
 | **Nombre instalación**   | Etiqueta libre. Aparece como nombre del dispositivo y prefijo sensor.                           | `Casa principal`                              |
 | **URL de tu HA**         | URL HTTPS (local o pública). Default: `external_url` / `internal_url` configurada en HA.       | `https://192.168.1.50:8123`  o  `https://micasa.duckdns.org` |
+| **Calcular precio (€)**  | Casilla opt-in. Si la marcas, aparece un segundo paso que pide los 4 parámetros de tarifa y se crean además 3 entidades de coste (€). Si la dejas vacía, no se crea nada de coste — comportamiento idéntico a v0.4.x. Toggle también disponible post-install vía *Configurar*. | (sin marcar)                       |
 
 Al pulsar **Enviar**:
 
@@ -128,6 +129,8 @@ A partir de aquí, cada click vuelca lo que haya nuevo. Las estadísticas son **
 
 ## Entidades
 
+### Consumo (siempre)
+
 Por contrato, **3 sensores agrupados en un dispositivo** con tu nombre de instalación:
 
 | Sensor                  | Unidad | Clase                | Para qué                                                                |
@@ -156,6 +159,28 @@ Atributos comunes (los 3 sensores los exponen):
 `Lectura del contador` añade `meter_reading_at` y `raw_reading` ("56,735m³"). `Consumo periodo` añade `readings_count`.
 
 Estadísticas externas: `canal_isabel_ii:consumption_<contract>` — alimenta el **panel de Energía → Agua** con histórico horario.
+
+### Coste (opt-in, desde v0.5.0)
+
+Si marcaste la casilla **Calcular precio (€)** en el asistente, además de los 3 sensores anteriores se crean **3 sensores de coste por contrato**:
+
+| Sensor                          | Unidad   | Clase                | Para qué                                                                                                  |
+|---------------------------------|----------|----------------------|-----------------------------------------------------------------------------------------------------------|
+| `Coste acumulado`               | €        | `total_increasing`   | € totales acumulados (variable + cuota fija + suplementaria + IVA). Va al panel de Energía → Costes.       |
+| `Precio actual`                 | €/m³     | `measurement`        | Precio del próximo m³ — bloque actual sumando los 4 servicios + suplementaria + IVA.                       |
+| `Bloque tarifario actual`       | (1-4)    | `measurement`        | Bloque del próximo m³ (B1 ≤ 20 m³, B2 20-40, B3 40-60, B4 > 60), prorrateado al periodo bimestral.         |
+
+`Coste acumulado` también se publica como **estadística externa horaria** `canal_isabel_ii:cost_<contract>`. En el panel de Energía:
+
+1. *Ajustes → Paneles → Energía → Añadir consumo de agua*.
+2. En la fuente de agua, opción **"Usa una entidad rastreando el coste total"** y elige `sensor.<install>_coste_acumulado`.
+3. El gráfico mostrará el coste acumulado horario, agrupado por día/mes según el zoom.
+
+`Bloque tarifario actual` expone como atributos los m³ ya consumidos en cada bloque del bimestre en curso y los umbrales prorrateados — útil para automatizaciones tipo *"avísame cuando entre en B3"*.
+
+Los 4 parámetros de tarifa (calibre del contador, nº viviendas, cuota suplementaria de alcantarillado, IVA) son editables después en *Ajustes → Dispositivos y servicios → Canal de Isabel II → Configurar*. Si los cambias, la integración recarga automáticamente y las entidades aparecen / se actualizan al instante. **Desactivar la casilla** en *Configurar* elimina las 3 entidades de coste pero mantiene las de consumo.
+
+> **Modelo de tarifa**: hardcoded para Doméstico 1-vivienda con las vigencias actuales (2025 BOCM 129/31-05-2025 + 2026 vigente desde 01-01-2026). Validado contra dos facturas reales con desvío < 1 %. Los periodos que cruzan la frontera de vigencia se parten y prorratean automáticamente. Otros usos (industrial / comercial / comunidades grandes) **no están soportados** en v0.5.0.
 
 ## Servicios
 

@@ -6,11 +6,29 @@
         "description": "This integration receives consumption data over HTTP from a *bookmarklet* (a JavaScript favorite) that you click in your browser while logged into the Oficina Virtual.\n\nEnter a name for this installation and the HTTPS URL of your Home Assistant (local or public — both work as long as it's HTTPS). On confirm, a persistent notification will show the bookmarklet code ready to paste.",
         "data": {
           "name": "Installation name",
-          "ha_url": "HTTPS URL of Home Assistant"
+          "ha_url": "HTTPS URL of Home Assistant",
+          "enable_cost": "Compute price (€) on top of consumption (m³)"
         },
         "data_description": {
           "name": "Friendly label for your sensors and device (e.g. \"my home\"). The contract number is still used as the internal identifier and is bound automatically the first time you click the bookmarklet.",
-          "ha_url": "Where the bookmarklet will POST. It can be an HTTPS URL on your LAN (an IP or hostname reachable from the browser that will click the bookmarklet) or a public HTTPS URL (DuckDNS, Nabu Casa, Cloudflare Tunnel, etc.) if you want to use it from anywhere. Must be HTTPS in both cases — browsers block HTTP fetches from the HTTPS portal page. Default: {default_url}."
+          "ha_url": "Where the bookmarklet will POST. It can be an HTTPS URL on your LAN (an IP or hostname reachable from the browser that will click the bookmarklet) or a public HTTPS URL (DuckDNS, Nabu Casa, Cloudflare Tunnel, etc.) if you want to use it from anywhere. Must be HTTPS in both cases — browsers block HTTP fetches from the HTTPS portal page. Default: {default_url}.",
+          "enable_cost": "When enabled, extra cost entities (cumulative €, current €/m³, current tariff block) are created and can be wired into the Energy dashboard. Leave unticked to keep the integration consumption-only as in v0.4.x."
+        }
+      },
+      "cost": {
+        "title": "Tariff parameters",
+        "description": "These four values are needed to reproduce your bill within ±10 %. If you don't have them at hand, leave the defaults — you can fix them later via the integration's \"Configure\" panel once you have a real bill.",
+        "data": {
+          "diametro_mm": "Meter caliber (mm)",
+          "n_viviendas": "Number of dwellings",
+          "cuota_supl_alc_eur_m3": "Supplementary sewer fee (€/m³)",
+          "iva_pct": "VAT (%)"
+        },
+        "data_description": {
+          "diametro_mm": "Nominal meter diameter, printed on your bill as \"Calibre\". Single-family domestic: usually 13 or 15. Communal or large consumers: 20, 25, 30 or higher.",
+          "n_viviendas": "How many dwellings this meter serves. Single-family home = 1. Building with one shared meter = number of flats.",
+          "cuota_supl_alc_eur_m3": "Set by your municipality. Printed on the bill as \"Cuota suplementaria de alcantarillado\". Leave at 0.0 if your municipality doesn't charge it.",
+          "iva_pct": "VAT applied to the whole bill. Default 10 %; only change it if your tax regime is different."
         }
       }
     },
@@ -20,6 +38,28 @@
     },
     "abort": {
       "reauth_not_supported": "There's no HA-side session that can expire — the data is pushed by your browser via bookmarklet. To rotate the token, delete this integration and add it again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Canal de Isabel II tariff",
+        "description": "Edit the parameters used to compute cost. You can also disable the cost entity if you no longer need it — the consumption (m³) sensors keep working.",
+        "data": {
+          "enable_cost": "Compute price (€) on top of consumption (m³)",
+          "diametro_mm": "Meter caliber (mm)",
+          "n_viviendas": "Number of dwellings",
+          "cuota_supl_alc_eur_m3": "Supplementary sewer fee (€/m³)",
+          "iva_pct": "VAT (%)"
+        },
+        "data_description": {
+          "enable_cost": "If you turn this off, cost entities disappear after the integration reloads (the m³ sensors stay).",
+          "diametro_mm": "Nominal meter diameter on your bill (\"Calibre\"). Single-family domestic: 13 or 15.",
+          "n_viviendas": "Single-family = 1. Building with one shared meter = number of flats.",
+          "cuota_supl_alc_eur_m3": "The exact value is on your bill, labelled \"Cuota suplementaria de alcantarillado\". 0.0 if your municipality doesn't charge it.",
+          "iva_pct": "VAT percentage. Default 10 %."
+        }
+      }
     }
   },
   "entity": {
@@ -32,6 +72,15 @@
       },
       "meter_reading": {
         "name": "Meter reading"
+      },
+      "cumulative_cost": {
+        "name": "Cumulative cost"
+      },
+      "current_price": {
+        "name": "Current price"
+      },
+      "current_block": {
+        "name": "Current tariff block"
       }
     }
   },

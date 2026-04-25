@@ -3,6 +3,94 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-04-25
+
+### Añadido
+
+- **Entidades de coste opt-in (€)**, alimentadas por un modelo de
+  tarifa de Canal de Isabel II que reproduce facturas reales con un
+  desvío inferior al 1 % en los dos casos de prueba (alta consumición
+  cruzando los cuatro bloques, y consumo bajo cruzando la frontera de
+  vigencia 01-01-2026). Se activan marcando *"Calcular precio (€)
+  además del consumo (m³)"* en el asistente de configuración o, post
+  install, en *Configurar* de la integración (Options Flow). Si no
+  marcas el check, la integración se comporta exactamente como la
+  v0.4.x — solo entidades de m³, coste cero en runtime.
+  - **`sensor.<install>_coste_acumulado`** (€, `device_class:
+    monetary`, `state_class: total_increasing`). Coste total
+    acumulado desde el inicio de la serie. Se publica también como
+    estadística externa horaria `canal_isabel_ii:cost_<contract>`,
+    para enchufarlo al **Panel de Energía → Costes** sin templates.
+  - **`sensor.<install>_precio_actual`** (€/m³). Precio que pagaría
+    el siguiente m³ a fecha de hoy: bloque tarifario actual sumando
+    los cuatro servicios (aducción + distribución + alcantarillado +
+    depuración) + cuota suplementaria de alcantarillado + IVA.
+  - **`sensor.<install>_bloque_tarifario_actual`** (entero 1-4). El
+    bloque del próximo m³, prorrateado al periodo bimestral en curso
+    (B1 ≤ 20 m³, B2 20-40, B3 40-60, B4 > 60). Atributos con los
+    umbrales y los m³ ya consumidos por bloque.
+- **Cuatro parámetros editables** en el flujo de configuración cuando
+  marcas la casilla, también editables después vía *Configurar*:
+  - *Calibre del contador* (mm) — campo `Calibre` de la factura.
+    Doméstico unifamiliar es típicamente 13 o 15 mm.
+  - *Número de viviendas* — vivienda unifamiliar = 1; comunidad con
+    contador único = nº de pisos.
+  - *Cuota suplementaria de alcantarillado* (€/m³) — varía por
+    municipio. Está en la factura como *"Cuota suplementaria de
+    alcantarillado"*.
+  - *IVA* (%) — por defecto 10 % (régimen general del agua en
+    España). Expuesto solo por si cambia el régimen fiscal en el
+    futuro.
+- **Tablas de tarifa hardcoded** para las dos vigencias actuales:
+  2025 (BOCM 129 de 31-05-2025) y 2026 (vigente desde 01-01-2026,
+  observada en facturas reales que cruzan la frontera). Cuando BOCM
+  publique la siguiente actualización, basta con añadir un
+  `TariffSet` nuevo a `tariff.VIGENCIAS` y la lógica de pro-rateo
+  por vigencia se aplica automáticamente a los periodos que crucen.
+- **Algoritmo de coste por hora**
+  (`tariff.compute_hourly_cost_stream`): agrupa lecturas por
+  bimestre natural, calcula el total exacto del periodo (variable
+  por bloques + cuota fija + suplementaria + IVA, partido por
+  vigencia si toca), y reparte ese total por hora del bimestre
+  proporcional al m³ horario (variable + suplementaria) más una
+  fracción uniforme de la cuota fija. La suma exacta del periodo
+  coincide con la factura; la distribución intra-día es una
+  aproximación razonable que el panel de Energía no nota.
+- **24 tests unitarios nuevos** en `tests/test_tariff.py`,
+  incluyendo dos tests de validación contra factura real
+  (anonimizadas — solo coinciden los números agregados, ningún dato
+  identificativo). Stack total: 143 tests, sigue verde.
+
+### Cambiado
+
+- **`config_flow.py` ahora tiene un segundo paso opcional** (sólo si
+  marcas *"Calcular precio (€)"* en el primer paso). El flujo
+  existente sin ese check sigue siendo idéntico — un único paso con
+  los dos campos de siempre.
+- **Nuevo `OptionsFlow`** para editar parámetros de coste y
+  desactivar / reactivar la entidad de coste sin eliminar y volver a
+  añadir la integración. Cambios disparan un reload completo del
+  entry para que las entidades aparezcan / desaparezcan al instante.
+
+### Notas
+
+- **Migración desde v0.4.x sin sorpresas**: el campo `enable_cost`
+  por defecto es `False`, así que los entries existentes se
+  comportan exactamente igual que antes. Para activar el coste:
+  *Ajustes → Dispositivos y servicios → Canal de Isabel II →
+  Configurar*.
+- **Sólo soporta uso "Doméstico 1 vivienda" en v0.5.0**. La
+  estructura de bloques y precios para industrial / comercial /
+  comunidades grandes es distinta y necesitaríamos facturas de
+  muestra para modelarlas. Si vas a usar el coste en otro régimen,
+  espera a una versión futura o abre un issue con una factura
+  anonimizada.
+- **B2-B4 de 2026 son extrapolados** (con el delta % observado en
+  B1) hasta que llegue una factura real con > 20 m³ post-2026 que
+  sirva para fijarlos. Para usuarios doméstico 1-vivienda con
+  consumos < 20 m³ bimestrales (la mayoría) la extrapolación es
+  irrelevante porque solo ven B1.
+
 ## [0.4.11] — 2026-04-25
 
 ### Documentación
