@@ -3,6 +3,29 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.1] — 2026-04-25
+
+### Cambiado
+
+- Los cuatro campos del paso *"Parámetros de tarifa"* (asistente y
+  *Configurar*) ahora se renderizan como **inputs numéricos
+  tecleables** con flechas arriba/abajo, no como sliders. Antes, el
+  *Calibre del contador* salía como slider porque Home Assistant
+  auto-elegía el widget en función del rango entero — ahora es
+  consistente con los otros tres campos.
+- Rangos válidos ajustados a uso doméstico realista: calibre 10-50 mm
+  (era 10-200), número de viviendas 1-200 (era 1-999), cuota
+  suplementaria 0-1,0 €/m³ (era 0-10), IVA 0-25 % (era 0-100). Los
+  límites superiores anteriores eran absurdos para una factura
+  doméstica.
+
+### Notas
+
+- Cambio puramente de UX en el formulario — los valores ya guardados
+  no se ven afectados, no hay migración. Si abres *Configurar* después
+  de actualizar verás los mismos cuatro campos pero en cajas
+  numéricas.
+
 ## [0.5.0] — 2026-04-25
 
 ### Añadido

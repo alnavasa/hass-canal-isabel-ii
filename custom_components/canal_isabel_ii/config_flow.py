@@ -52,6 +52,11 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .const import (
     CONF_CUOTA_SUPL_ALC,
@@ -73,6 +78,72 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+# Realistic ranges for residential / small-community Canal de Isabel II
+# contracts. Bounds chosen to keep the input typeable (NumberSelector
+# in BOX mode renders as input box rather than slider) and to reject
+# obviously-wrong values (a 200 mm contador would be industrial, a
+# 100 % IVA would be a typo).
+_DIAMETRO_MIN_MM, _DIAMETRO_MAX_MM = 10, 50
+_VIVIENDAS_MIN, _VIVIENDAS_MAX = 1, 200
+_CUOTA_MIN, _CUOTA_MAX = 0.0, 1.0
+_IVA_MIN, _IVA_MAX = 0.0, 25.0
+
+
+def _cost_fields(
+    *,
+    diametro: int = DEFAULT_DIAMETRO_MM,
+    viviendas: int = DEFAULT_N_VIVIENDAS,
+    suplementaria: float = DEFAULT_CUOTA_SUPL_ALC,
+    iva: float = DEFAULT_IVA_PCT,
+) -> dict:
+    """Build the cost-params field dict with given defaults.
+
+    Returns a dict (not a vol.Schema) so callers can compose it with
+    additional fields — e.g. the OptionsFlow prepends ``enable_cost``
+    so the user can toggle the feature off without leaving the form.
+
+    All four fields use ``NumberSelector`` with ``mode=BOX`` so they
+    render as typeable input boxes (with up/down spinners) instead of
+    sliders. Without this, HA's auto-detection picks a slider widget
+    for the diameter field because of its int+wide-range schema, which
+    is awkward for a value the user just wants to type from their bill.
+    """
+    return {
+        vol.Required(CONF_DIAMETRO_MM, default=diametro): NumberSelector(
+            NumberSelectorConfig(
+                min=_DIAMETRO_MIN_MM,
+                max=_DIAMETRO_MAX_MM,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+            )
+        ),
+        vol.Required(CONF_N_VIVIENDAS, default=viviendas): NumberSelector(
+            NumberSelectorConfig(
+                min=_VIVIENDAS_MIN,
+                max=_VIVIENDAS_MAX,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+            )
+        ),
+        vol.Required(CONF_CUOTA_SUPL_ALC, default=suplementaria): NumberSelector(
+            NumberSelectorConfig(
+                min=_CUOTA_MIN,
+                max=_CUOTA_MAX,
+                step=0.0001,
+                mode=NumberSelectorMode.BOX,
+            )
+        ),
+        vol.Required(CONF_IVA_PCT, default=iva): NumberSelector(
+            NumberSelectorConfig(
+                min=_IVA_MIN,
+                max=_IVA_MAX,
+                step=0.5,
+                mode=NumberSelectorMode.BOX,
+            )
+        ),
+    }
+
+
 def _cost_schema(
     *,
     diametro: int = DEFAULT_DIAMETRO_MM,
@@ -80,28 +151,14 @@ def _cost_schema(
     suplementaria: float = DEFAULT_CUOTA_SUPL_ALC,
     iva: float = DEFAULT_IVA_PCT,
 ) -> vol.Schema:
-    """Build the cost-params voluptuous schema with given defaults.
-
-    Factored out so the ConfigFlow's "cost" step and the OptionsFlow
-    share one definition — both render the same fields, only the
-    pre-filled defaults differ (defaults vs already-configured
-    values).
-    """
+    """Wrap ``_cost_fields`` in a ``vol.Schema`` for the ConfigFlow step."""
     return vol.Schema(
-        {
-            vol.Required(CONF_DIAMETRO_MM, default=diametro): vol.All(
-                vol.Coerce(int), vol.Range(min=10, max=200)
-            ),
-            vol.Required(CONF_N_VIVIENDAS, default=viviendas): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=999)
-            ),
-            vol.Required(CONF_CUOTA_SUPL_ALC, default=suplementaria): vol.All(
-                vol.Coerce(float), vol.Range(min=0.0, max=10.0)
-            ),
-            vol.Required(CONF_IVA_PCT, default=iva): vol.All(
-                vol.Coerce(float), vol.Range(min=0.0, max=100.0)
-            ),
-        }
+        _cost_fields(
+            diametro=diametro,
+            viviendas=viviendas,
+            suplementaria=suplementaria,
+            iva=iva,
+        )
     )
 
 
@@ -238,22 +295,12 @@ class CanalOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENABLE_COST,
                     default=bool(merged.get(CONF_ENABLE_COST, False)),
                 ): bool,
-                vol.Required(
-                    CONF_DIAMETRO_MM,
-                    default=int(merged.get(CONF_DIAMETRO_MM, DEFAULT_DIAMETRO_MM)),
-                ): vol.All(vol.Coerce(int), vol.Range(min=10, max=200)),
-                vol.Required(
-                    CONF_N_VIVIENDAS,
-                    default=int(merged.get(CONF_N_VIVIENDAS, DEFAULT_N_VIVIENDAS)),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=999)),
-                vol.Required(
-                    CONF_CUOTA_SUPL_ALC,
-                    default=float(merged.get(CONF_CUOTA_SUPL_ALC, DEFAULT_CUOTA_SUPL_ALC)),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
-                vol.Required(
-                    CONF_IVA_PCT,
-                    default=float(merged.get(CONF_IVA_PCT, DEFAULT_IVA_PCT)),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                **_cost_fields(
+                    diametro=int(merged.get(CONF_DIAMETRO_MM, DEFAULT_DIAMETRO_MM)),
+                    viviendas=int(merged.get(CONF_N_VIVIENDAS, DEFAULT_N_VIVIENDAS)),
+                    suplementaria=float(merged.get(CONF_CUOTA_SUPL_ALC, DEFAULT_CUOTA_SUPL_ALC)),
+                    iva=float(merged.get(CONF_IVA_PCT, DEFAULT_IVA_PCT)),
+                ),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
