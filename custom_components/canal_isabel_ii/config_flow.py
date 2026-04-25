@@ -126,10 +126,17 @@ def _cost_fields(
             )
         ),
         vol.Required(CONF_CUOTA_SUPL_ALC, default=suplementaria): NumberSelector(
+            # ``step="any"`` removes step coercion in the UI: HA's
+            # ``NumberSelectorConfig`` schema rejects any numeric
+            # ``step`` below ``1e-3`` (see core ``selector.py``), and
+            # cuota suplementaria values from real bills have 4
+            # decimals (e.g. ``0.1234 €/m³``). Using ``"any"`` lets
+            # the user type the exact value from the bill without
+            # forcing a 0.001 grid.
             NumberSelectorConfig(
                 min=_CUOTA_MIN,
                 max=_CUOTA_MAX,
-                step=0.0001,
+                step="any",
                 mode=NumberSelectorMode.BOX,
             )
         ),

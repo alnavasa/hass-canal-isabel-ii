@@ -3,6 +3,30 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.3] — 2026-04-25
+
+### Arreglado
+
+- **Wizard de "Añadir integración" mostraba "Unknown error occurred"**
+  en cuanto se marcaba la casilla *Calcular precio (€)*, dejando
+  imposible crear nuevas instalaciones con coste habilitado (regresión
+  introducida en v0.5.1 al cambiar los campos de tarifa de slider a
+  caja tecleable). El campo *Cuota suplementaria de alcantarillado*
+  llevaba `step=0.0001`, pero el `NumberSelector` de HA exige
+  `step >= 1e-3` (o el literal `"any"`), así que la construcción del
+  schema lanzaba `MultipleInvalid` y el wizard caía con error genérico.
+  Ahora se usa `step="any"`, que deja al usuario teclear los 4
+  decimales típicos de la cuota suplementaria (`0,1234 €/m³`) sin
+  forzar ninguna rejilla.
+
+### Añadido
+
+- Test de regresión `tests/test_config_flow_schema.py` que comprueba
+  por AST que **todos** los `NumberSelectorConfig(step=...)` del config
+  flow respetan la restricción de HA (`"any"` o `>= 1e-3`). Sin
+  necesidad de instalar `homeassistant` en CI — pesa ~50 MB y para
+  cazar este bug basta con leer el AST.
+
 ## [0.5.2] — 2026-04-25
 
 ### Arreglado
