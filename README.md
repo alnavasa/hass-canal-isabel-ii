@@ -194,7 +194,7 @@ Pasos en HA:
 
 > **Si ves *"Estadísticas no definidas"*** justo después de guardar es normal: HA tarda hasta 5 min en compilar las primeras stats del sensor. Espera y refresca — el aviso desaparece solo y el coste empieza a aparecer en la sección **Costes** del Resumen.
 
-> **Si ves coste = 0 € en periodos del pasado** (antes de v0.5.2): elimina la fuente de agua del panel y vuelve a añadirla — el panel cachea las stats de coste y solo recalcula al cambiar la configuración. Tras v0.5.2 los nuevos seteos ya funcionan a la primera.
+> **Si vienes de v0.5.2 / v0.5.3** y veías 0 € en periodos antiguos o barras negativas en el último mes: v0.5.4 corre una migración automática al arrancar que limpia las stats viejas y reescribe la serie monótona desde cero. No tienes que tocar nada — al primer tick del coordinator (próxima hora o pulsar bookmarklet) el panel se autocura.
 
 ## Servicios
 
