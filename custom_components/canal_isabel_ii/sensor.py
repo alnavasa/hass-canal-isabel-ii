@@ -14,6 +14,7 @@ from homeassistant.components.recorder.models import (
 )
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
+    async_import_statistics,
     get_last_statistics,
     statistics_during_period,
 )
@@ -784,30 +785,95 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         super()._handle_coordinator_update()
 
     async def _push_cost_statistics(self) -> None:
-        """Push the cumulative-cost stream to long-term statistics so
-        the Energy panel can chart cost over time.
+        """Push the cumulative-cost stream to long-term statistics.
 
-        Mirrors :meth:`CanalCumulativeConsumptionSensor._push_statistics`
-        — same get_last + delta strategy, just with €/cost instead of
-        liters. Backfill semantics are identical: any timestamp at or
-        before the last stored ``start`` triggers a full replay.
+        We push *twice* with the same data:
+
+        1. **External statistic** ``canal_isabel_ii:cost_<contract>`` —
+           visible in the Energy panel's "cost entity" picker as
+           ``"<install> - Canal de Isabel II coste"``. Power users who
+           prefer the explicit external stat can pick it there.
+
+        2. **Entity statistic** ``sensor.<…>_coste_acumulado`` — the
+           recorder auto-generates stats for any ``total_increasing``
+           sensor, but those auto-stats only start from the moment the
+           sensor was first created. If the cost feature is enabled
+           after the integration has already been collecting data, the
+           entity's stats are nearly empty and the Energy panel shows
+           **0 €** for any reporting period predating the cost feature
+           toggle. By also importing the cumulative stream against the
+           entity's own ``statistic_id``, the panel can pick the entity
+           in its wizard (the obvious UX choice) and still see the full
+           historical cost.
+
+        Both writes are upserts by ``(statistic_id, start)``, so
+        re-running this on every coordinator update is cheap and idem-
+        potent. Backfill semantics mirror the consumption push: any
+        timestamp at or before the last stored ``start`` triggers a
+        full replay of the series; otherwise we filter forward-only.
         """
         stream = self._cost_stream()
         if not stream:
             return
 
-        statistic_id = f"{STATISTICS_SOURCE}:cost_{self._contract_id}"
         currency = self._attr_native_unit_of_measurement or "EUR"
-        metadata = StatisticMetaData(
+
+        # Convert the cumulative stream into (utc_ts, cumulative_eur)
+        # pairs ordered chronologically. The cost stream is *already*
+        # a running total — we store ``state=running, sum=running``
+        # directly, no continuation offset needed.
+        items: list[tuple[datetime, float]] = []
+        for hc in stream:
+            ts = hc.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            items.append((ts.astimezone(dt_util.UTC), hc.cumulative_eur))
+
+        # 1) External statistic — survives even if the entity is
+        #    renamed/deleted and shows up as a separately-pickable
+        #    series in the Energy panel wizard.
+        external_meta = StatisticMetaData(
             source=STATISTICS_SOURCE,
-            statistic_id=statistic_id,
+            statistic_id=f"{STATISTICS_SOURCE}:cost_{self._contract_id}",
             has_sum=True,
             name=f"{self._install_name} - Canal de Isabel II coste",
             unit_of_measurement=currency,
             mean_type=StatisticMeanType.NONE,
             unit_class=None,
         )
+        await self._submit_running_stats(external_meta, items, async_add_external_statistics)
 
+        # 2) Entity statistic — seeds the recorder series the user sees
+        #    when they pick the sensor in the Energy panel wizard. Skip
+        #    if entity_id isn't bound yet (shouldn't happen because
+        #    _handle_coordinator_update only fires after the entity is
+        #    added, but defensive).
+        if self.entity_id:
+            entity_meta = StatisticMetaData(
+                source="recorder",
+                statistic_id=self.entity_id,
+                has_sum=True,
+                name=None,  # entity's friendly_name takes over
+                unit_of_measurement=currency,
+                mean_type=StatisticMeanType.NONE,
+                unit_class=None,
+            )
+            await self._submit_running_stats(entity_meta, items, async_import_statistics)
+
+    async def _submit_running_stats(
+        self,
+        metadata: StatisticMetaData,
+        items: list[tuple[datetime, float]],
+        pusher,
+    ) -> None:
+        """Common path: read last stat, decide backfill vs forward, push.
+
+        ``pusher`` is either ``async_add_external_statistics`` (for
+        ``source != "recorder"`` external sources) or
+        ``async_import_statistics`` (for ``source == "recorder"`` entity
+        sources). Both have identical signatures and are fire-and-forget.
+        """
+        statistic_id = metadata["statistic_id"]
         recorder = get_recorder_instance(self.hass)
         last_stats = await recorder.async_add_executor_job(
             get_last_statistics,
@@ -817,44 +883,26 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
             True,
             {"sum"},
         )
-        last_sum = 0.0
         last_start: datetime | None = None
         if last_stats and statistic_id in last_stats and last_stats[statistic_id]:
             entry = last_stats[statistic_id][0]
-            last_sum = float(entry.get("sum") or 0.0)
             raw_start = entry.get("start") or entry.get("end")
             if isinstance(raw_start, (int, float)):
                 last_start = dt_util.utc_from_timestamp(float(raw_start))
             elif raw_start is not None:
                 last_start = dt_util.parse_datetime(str(raw_start))
 
-        # Convert cumulative stream into (utc_ts, cumulative_eur) pairs
-        # ordered chronologically — same shape the consumption push
-        # uses, just the per-hour value is € instead of liters.
-        items: list[tuple[datetime, float]] = []
-        for hc in stream:
-            ts = hc.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-            items.append((ts.astimezone(dt_util.UTC), hc.cumulative_eur))
-
-        # The cost stream is *already* a running total — we store
-        # ``state=running, sum=running`` directly without a continuation
-        # offset. If a backfill is detected we replay everything; if
-        # not, we filter forward-only items.
         if needs_backfill([(ts, 0.0) for ts, _ in items], last_start):
-            stats = [StatisticData(start=ts, state=running, sum=running) for ts, running in items]
+            stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in items]
             _LOGGER.info(
                 "%s: backfill — replaying %d hourly cost stats",
                 statistic_id,
                 len(stats),
             )
-            async_add_external_statistics(self.hass, metadata, stats)
+            pusher(self.hass, metadata, stats)
             return
 
-        new_items = [
-            (ts, running) for ts, running in items if last_start is None or ts > last_start
-        ]
+        new_items = [(ts, v) for ts, v in items if last_start is None or ts > last_start]
         if not new_items:
             _LOGGER.debug(
                 "%s: no new hourly cost rows to import (last_start=%s)",
@@ -863,14 +911,13 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
             )
             return
 
-        stats = [StatisticData(start=ts, state=running, sum=running) for ts, running in new_items]
+        stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in new_items]
         _LOGGER.debug(
-            "%s: importing %d new hourly cost stats (last_sum=%.2f)",
+            "%s: importing %d new hourly cost stats",
             statistic_id,
             len(stats),
-            last_sum,
         )
-        async_add_external_statistics(self.hass, metadata, stats)
+        pusher(self.hass, metadata, stats)
 
 
 class CanalCurrentPriceSensor(_ContractSensor, _CostSensorMixin):

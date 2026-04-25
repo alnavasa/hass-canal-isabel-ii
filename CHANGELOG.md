@@ -3,6 +3,32 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.2] — 2026-04-25
+
+### Arreglado
+
+- **Panel de Energía → Costes mostraba 0 €** cuando se seleccionaba
+  el sensor `Coste acumulado` como entidad de coste, porque las
+  estadísticas auto-generadas del sensor solo arrancaban en el
+  momento en que se activó la casilla *Calcular precio (€)* — para
+  cualquier periodo anterior, el panel calculaba un *delta* nulo. Ahora
+  la integración **siembra el statistic_id del propio sensor** con el
+  histórico horario completo (vía `async_import_statistics`),
+  paralelo al push de la estadística externa `canal_isabel_ii:cost_<contract>`
+  que ya existía. Cualquiera de las dos opciones que escoja el user
+  en el asistente del panel de Energía funciona ya con histórico real.
+
+### Notas
+
+- Si vienes de v0.5.0/v0.5.1 con el panel ya configurado y mostrando
+  0 €, **bórralo y vuelve a añadirlo** desde *Ajustes → Paneles →
+  Energía → editar* (el panel cachea las cost-stats y solo recalcula
+  al cambiar la fuente). Tras esa re-creación, los nuevos seteos
+  recuperan el histórico completo desde el primer ingest.
+- README ampliado con sección **"Conectarlo al panel de Energía"**:
+  pasos numerados, qué seleccionar en cada dropdown, y por qué el
+  warning *"Estadísticas no definidas"* es benigno.
+
 ## [0.5.1] — 2026-04-25
 
 ### Cambiado

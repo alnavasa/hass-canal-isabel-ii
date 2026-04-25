@@ -18,8 +18,30 @@ jobs:
         run: |
           cd custom_components/canal_isabel_ii
           zip -r ../../canal_isabel_ii.zip .
+      - name: Extract CHANGELOG section for this tag
+        id: changelog
+        # Pull the block between the first "## [" header and the next
+        # one — that's the entry for the version we're releasing.
+        # Falls back to a one-liner if nothing matches (shouldn't
+        # happen if CHANGELOG.md is updated as part of the bump).
+        run: |
+          awk '
+            /^## \[/ {
+              found++
+              if (found == 2) exit
+            }
+            found == 1 { print }
+          ' CHANGELOG.md > release_body.md
+          if [ ! -s release_body.md ]; then
+            echo "Sin entrada en CHANGELOG.md para esta versión." > release_body.md
+          fi
+          echo "----- release body preview -----"
+          cat release_body.md
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: canal_isabel_ii.zip
+          body_path: release_body.md
+          # Adds the auto-generated "What's Changed" / Full Changelog
+          # link section *below* our CHANGELOG excerpt.
           generate_release_notes: true

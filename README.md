@@ -170,17 +170,31 @@ Si marcaste la casilla **Calcular precio (€)** en el asistente, además de los
 | `Precio actual`                 | €/m³     | `measurement`        | Precio del próximo m³ — bloque actual sumando los 4 servicios + suplementaria + IVA.                       |
 | `Bloque tarifario actual`       | (1-4)    | `measurement`        | Bloque del próximo m³ (B1 ≤ 20 m³, B2 20-40, B3 40-60, B4 > 60), prorrateado al periodo bimestral.         |
 
-`Coste acumulado` también se publica como **estadística externa horaria** `canal_isabel_ii:cost_<contract>`. En el panel de Energía:
-
-1. *Ajustes → Paneles → Energía → Añadir consumo de agua*.
-2. En la fuente de agua, opción **"Usa una entidad rastreando el coste total"** y elige `sensor.<install>_coste_acumulado`.
-3. El gráfico mostrará el coste acumulado horario, agrupado por día/mes según el zoom.
-
 `Bloque tarifario actual` expone como atributos los m³ ya consumidos en cada bloque del bimestre en curso y los umbrales prorrateados — útil para automatizaciones tipo *"avísame cuando entre en B3"*.
 
 Los 4 parámetros de tarifa (calibre del contador, nº viviendas, cuota suplementaria de alcantarillado, IVA) son editables después en *Ajustes → Dispositivos y servicios → Canal de Isabel II → Configurar*. Si los cambias, la integración recarga automáticamente y las entidades aparecen / se actualizan al instante. **Desactivar la casilla** en *Configurar* elimina las 3 entidades de coste pero mantiene las de consumo.
 
 > **Modelo de tarifa**: hardcoded para Doméstico 1-vivienda con las vigencias actuales (2025 BOCM 129/31-05-2025 + 2026 vigente desde 01-01-2026). Validado contra dos facturas reales con desvío < 1 %. Los periodos que cruzan la frontera de vigencia se parten y prorratean automáticamente. Otros usos (industrial / comercial / comunidades grandes) **no están soportados** en v0.5.0.
+
+#### Conectarlo al panel de Energía
+
+`Coste acumulado` se publica de dos formas para que el panel de Energía → Agua lo encuentre sin importar qué selector se use, **con histórico horario completo desde el primer ingest** (no solo desde que activaste la casilla):
+
+- como **estadística externa** `canal_isabel_ii:cost_<contract>` con nombre amigable `<install> - Canal de Isabel II coste`,
+- como **estadísticas seedadas en el statistic_id del propio sensor** `sensor.<install>_coste_acumulado`.
+
+Pasos en HA:
+
+1. **Ajustes → Paneles → Energía**.
+2. Sección **Agua** → **+ Añadir consumo de agua**.
+3. **Consumo de agua** → selecciona la estadística `canal_isabel_ii:consumption_<contract>` (aparece como `<install> - Canal de Isabel II`). Si prefieres una entidad, también vale `Consumo periodo`.
+4. **¿Cómo debe rastrear los costes Home Assistant?** → marca el radio **"Utilizar una entidad que realiza un seguimiento de los costes totales"**.
+5. **Entidad con los costes totales (EUR)** → selecciona `sensor.<install>_coste_acumulado` (etiquetado **Coste acumulado** en el dropdown).
+6. **Guardar**.
+
+> **Si ves *"Estadísticas no definidas"*** justo después de guardar es normal: HA tarda hasta 5 min en compilar las primeras stats del sensor. Espera y refresca — el aviso desaparece solo y el coste empieza a aparecer en la sección **Costes** del Resumen.
+
+> **Si ves coste = 0 € en periodos del pasado** (antes de v0.5.2): elimina la fuente de agua del panel y vuelve a añadirla — el panel cachea las stats de coste y solo recalcula al cambiar la configuración. Tras v0.5.2 los nuevos seteos ya funcionan a la primera.
 
 ## Servicios
 
