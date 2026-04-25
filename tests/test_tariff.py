@@ -227,74 +227,73 @@ class TestPeriodSplit:
 
 
 # ---------------------------------------------------------------------
-# Real-bill validation — the load-bearing ones
+# End-to-end regression — synthetic inputs, pinned outputs
 # ---------------------------------------------------------------------
 
 
-class TestRealBillValidation:
-    """End-to-end: compute the bill total and compare to the printed
-    "Total factura (IVA incluido)" of two real bills.
+class TestEndToEndSynthetic:
+    """End-to-end: pin ``compute_period_total_cost`` outputs for two
+    representative scenarios.
 
-    The bills themselves are NOT in the repo. Only the public tariff
-    inputs (m³, days, meter diameter, supplementary fee) and the bill
-    total are captured here, with no attribution.
+    These tests do **not** validate against any real bill — they pin
+    the model's behaviour for fully synthetic inputs so a regression in
+    the maths (block boundaries, prorrateo, vigencia split, IVA) trips
+    immediately. Real-bill validation lives outside this repo (each
+    user can verify against their own factura via "Configurar" in the
+    integration). All numeric inputs and totals here are synthetic.
     """
 
-    def test_high_consumption_single_vigencia_bill(self):
-        # Bill profile (anonymised):
-        # - Bimestral period, 59 days actual.
-        # - 244 m³ total — hits all four blocks.
+    def test_high_consumption_single_vigencia(self):
+        # Synthetic profile:
+        # - 61-day period entirely in 2025.
+        # - 200 m³ total — crosses all four blocks.
         # - 20 mm meter, 1 dwelling.
-        # - Supplementary fee: 0,1234 €/m³.
-        # - Period entirely within 2025 vigencia.
-        # - Printed "Total factura (IVA incluido)": 1000,00 €.
+        # - Supplementary sewer fee: 0,1500 €/m³ (synthetic).
         params = TariffParams(
             diametro_mm=20,
             n_viviendas=1,
-            cuota_supl_alc_eur_m3=0.1234,
+            cuota_supl_alc_eur_m3=0.1500,
         )
-        # Period dates (anonymised: just any 59-day stretch in 2025).
         result = compute_period_total_cost(
-            consumo_m3=244.0,
-            period_start=date(2025, 7, 21),
-            period_end=date(2025, 9, 18),  # exclusive — gives DP=59
+            consumo_m3=200.0,
+            period_start=date(2025, 6, 1),
+            period_end=date(2025, 8, 1),  # exclusive — gives DP=61
             params=params,
         )
-        printed_total = 1000.00
-        # Required by user: ≤ 10 % deviation. We achieve ≤ 0,1 % in
-        # practice; pin at 1 % so a real regression in the maths
-        # still trips the test before drifting to "barely useful".
-        assert abs(result.total_eur - printed_total) / printed_total < 0.01, (
-            f"computed {result.total_eur:.2f} vs bill {printed_total:.2f}"
+        # Pinned: any change in block boundaries, cuotas fijas, IVA, or
+        # prorrateo formula will drift this number. Recompute and
+        # update only after manual review.
+        expected_total = 860.04
+        assert abs(result.total_eur - expected_total) < 0.01, (
+            f"computed {result.total_eur:.2f} vs pinned {expected_total:.2f}"
         )
 
     def test_low_consumption_period_crossing_2026_boundary(self):
-        # Bill profile (anonymised):
-        # - 70-day period straddling 01-01-2026.
-        # - 12 m³ total — only block 1.
+        # Synthetic profile:
+        # - 75-day period straddling 01-01-2026.
+        # - 15 m³ total — block 1 only.
         # - 15 mm meter, 1 dwelling.
-        # - Supplementary fee changes at the boundary:
-        #     0,1234 €/m³ in 2025, 0,1234 €/m³ in 2026.
-        #   We approximate by using a single mean rate weighted by
-        #   days (the deviation is tiny, well within budget).
-        # - Printed "Total factura (IVA incluido)": 30,00 €.
-        days_2025 = (date(2026, 1, 1) - date(2025, 11, 6)).days  # 56
+        # - Supplementary fee changes at the vigencia boundary:
+        #     0,1050 €/m³ in 2025, 0,1100 €/m³ in 2026 (synthetic).
+        #   Approximated as a single mean weighted by days.
+        days_2025 = (date(2026, 1, 1) - date(2025, 11, 1)).days  # 61
         days_2026 = (date(2026, 1, 15) - date(2026, 1, 1)).days  # 14
-        weighted_supl = (0.1234 * days_2025 + 0.1234 * days_2026) / (days_2025 + days_2026)
+        weighted_supl = (0.1050 * days_2025 + 0.1100 * days_2026) / (days_2025 + days_2026)
         params = TariffParams(
             diametro_mm=15,
             n_viviendas=1,
             cuota_supl_alc_eur_m3=weighted_supl,
         )
         result = compute_period_total_cost(
-            consumo_m3=12.0,
-            period_start=date(2025, 11, 6),
+            consumo_m3=15.0,
+            period_start=date(2025, 11, 1),
             period_end=date(2026, 1, 15),
             params=params,
         )
-        printed_total = 30.00
-        assert abs(result.total_eur - printed_total) / printed_total < 0.02, (
-            f"computed {result.total_eur:.2f} vs bill {printed_total:.2f}"
+        # Pinned (see comment in previous test).
+        expected_total = 38.82
+        assert abs(result.total_eur - expected_total) < 0.01, (
+            f"computed {result.total_eur:.2f} vs pinned {expected_total:.2f}"
         )
 
 

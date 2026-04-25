@@ -83,9 +83,16 @@ _LOGGER = logging.getLogger(__name__)
 # in BOX mode renders as input box rather than slider) and to reject
 # obviously-wrong values (a 200 mm contador would be industrial, a
 # 100 % IVA would be a typo).
+#
+# Cuota suplementaria: real municipal values are well under 1 €/m³,
+# but we leave plenty of headroom (5 €/m³) so users can't trip on a
+# single-digit typo (e.g. ``1,2345`` when they meant ``0,1234``)
+# without HA throwing a useless "Value too large" error. The wrong
+# input still produces a wrong cost, but at least the form accepts it
+# and the user catches it the moment they compare to a real bill.
 _DIAMETRO_MIN_MM, _DIAMETRO_MAX_MM = 10, 50
 _VIVIENDAS_MIN, _VIVIENDAS_MAX = 1, 200
-_CUOTA_MIN, _CUOTA_MAX = 0.0, 1.0
+_CUOTA_MIN, _CUOTA_MAX = 0.0, 5.0
 _IVA_MIN, _IVA_MAX = 0.0, 25.0
 
 
@@ -129,7 +136,7 @@ def _cost_fields(
             # ``step="any"`` removes step coercion in the UI: HA's
             # ``NumberSelectorConfig`` schema rejects any numeric
             # ``step`` below ``1e-3`` (see core ``selector.py``), and
-            # cuota suplementaria values from real bills have 4
+            # cuota suplementaria values from real bills have up to 4
             # decimals (e.g. ``0.1234 €/m³``). Using ``"any"`` lets
             # the user type the exact value from the bill without
             # forcing a 0.001 grid.

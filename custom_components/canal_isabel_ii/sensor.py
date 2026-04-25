@@ -283,7 +283,7 @@ class CanalHourlyConsumptionSensor(_ContractSensor):
         # Falls back to the translated name from translations/*.json;
         # we also set an explicit name so it works without
         # translations.
-        self._attr_name = "Consumo última hora"
+        self._attr_name = "Canal Consumo última hora"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_hourly"
 
     @property
@@ -326,7 +326,7 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         contract_id: str,
     ) -> None:
         super().__init__(coordinator, entry, install_name, contract_id)
-        self._attr_name = "Consumo periodo"
+        self._attr_name = "Canal Consumo periodo"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_total"
         # Remembered across HA restarts so we never report below it.
         self._restored_value: float | None = None
@@ -590,7 +590,7 @@ class CanalMeterReadingSensor(_ContractSensor, RestoreSensor):
         contract_id: str,
     ) -> None:
         super().__init__(coordinator, entry, install_name, contract_id)
-        self._attr_name = "Lectura del contador"
+        self._attr_name = "Canal Lectura del contador"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_meter_reading"
         self._restored_value: float | None = None
 
@@ -728,7 +728,7 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         super().__init__(coordinator, entry, install_name, contract_id)
         self._params = params
         self._attr_native_unit_of_measurement = currency
-        self._attr_name = "Coste acumulado"
+        self._attr_name = "Canal Coste acumulado"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_cumulative_cost"
         self._restored_value: float | None = None
 
@@ -1067,7 +1067,7 @@ class CanalCurrentPriceSensor(_ContractSensor, _CostSensorMixin):
         # shows e.g. "EUR/m³". Some unit converters may complain; we
         # accept that in exchange for an obvious unit string.
         self._attr_native_unit_of_measurement = f"{currency}/m³"
-        self._attr_name = "Precio actual"
+        self._attr_name = "Canal Precio actual"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_price"
 
     @property
@@ -1125,7 +1125,7 @@ class CanalCurrentBlockSensor(_ContractSensor, _CostSensorMixin):
     ) -> None:
         super().__init__(coordinator, entry, install_name, contract_id)
         self._params = params
-        self._attr_name = "Bloque tarifario actual"
+        self._attr_name = "Canal Bloque tarifario actual"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_block"
 
     @property

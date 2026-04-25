@@ -3,6 +3,54 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.6] — 2026-04-25
+
+### Cambiado
+
+- **Entidades ahora se buscan tecleando "canal"** en *Herramientas de
+  Desarrollo → Estadísticas* y en cualquier otro filtro. Hasta ahora
+  el `friendly_name` se construía como `<install> + <entidad>` y
+  ninguna de las dos partes contenía la palabra "canal", así que al
+  filtrar por "canal" solo aparecían las *external statistics*
+  (`canal_isabel_ii:cost_*`, `canal_isabel_ii:consumption_*`),
+  dejando 6 entidades por contrato escondidas a menos que el usuario
+  recordara los sufijos exactos (`coste`, `precio`, `bloque`,
+  `lectura`, `consumo`). Ahora cada entidad lleva el prefijo "Canal"
+  en el nombre traducido:
+
+  | Antes | Ahora |
+  |-------|-------|
+  | `Casa principal Consumo última hora` | `Casa principal Canal Consumo última hora` |
+  | `Casa principal Consumo periodo` | `Casa principal Canal Consumo periodo` |
+  | `Casa principal Lectura del contador` | `Casa principal Canal Lectura del contador` |
+  | `Casa principal Coste acumulado` | `Casa principal Canal Coste acumulado` |
+  | `Casa principal Precio actual` | `Casa principal Canal Precio actual` |
+  | `Casa principal Bloque tarifario actual` | `Casa principal Canal Bloque tarifario actual` |
+
+  El `unique_id` y el `entity_id` de las **entidades existentes no
+  cambian** — solo cambia el `friendly_name` que se ve en la UI.
+  Instalaciones nuevas tendrán además `canal` en el slug del
+  `entity_id` (ej. `sensor.casa_principal_canal_coste_acumulado`),
+  con lo que también son buscables tecleando "canal" en cualquier
+  selector.
+
+- **`Cuota suplementaria de alcantarillado` admite ahora hasta
+  `5,0 €/m³`** (antes el máximo era `1,0`). Las cuotas reales de los
+  municipios están todas muy por debajo de 1 €/m³, pero el límite de
+  1 era demasiado estricto: si el usuario tecleaba un dígito de más
+  por error (ej. `1,1234` en vez de `0,1234`), HA respondía con
+  *"Value too large"* en lugar de aceptarlo y dejar que el usuario
+  detectara el typo cotejando con la factura real. Cambio puramente de
+  permisividad — los valores correctos siguen funcionando idénticamente.
+
+### Arreglado
+
+- (Interno, sin impacto funcional para el usuario) Limpieza de
+  comentarios y casos de test que contenían valores literales de
+  facturas reales del autor. Sustituidos por valores sintéticos para
+  cumplir la regla del proyecto de cero datos personales en el repo
+  público.
+
 ## [0.5.5] — 2026-04-25
 
 ### Arreglado

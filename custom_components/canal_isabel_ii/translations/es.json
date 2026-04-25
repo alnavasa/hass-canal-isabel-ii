@@ -65,22 +65,22 @@
   "entity": {
     "sensor": {
       "hourly_consumption": {
-        "name": "Consumo última hora"
+        "name": "Canal Consumo última hora"
       },
       "cumulative_consumption": {
-        "name": "Consumo periodo"
+        "name": "Canal Consumo periodo"
       },
       "meter_reading": {
-        "name": "Lectura del contador"
+        "name": "Canal Lectura del contador"
       },
       "cumulative_cost": {
-        "name": "Coste acumulado"
+        "name": "Canal Coste acumulado"
       },
       "current_price": {
-        "name": "Precio actual"
+        "name": "Canal Precio actual"
       },
       "current_block": {
-        "name": "Bloque tarifario actual"
+        "name": "Canal Bloque tarifario actual"
       }
     }
   },

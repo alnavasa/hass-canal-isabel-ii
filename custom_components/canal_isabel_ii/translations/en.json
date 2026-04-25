@@ -65,22 +65,22 @@
   "entity": {
     "sensor": {
       "hourly_consumption": {
-        "name": "Latest hourly consumption"
+        "name": "Canal Latest hourly consumption"
       },
       "cumulative_consumption": {
-        "name": "Period consumption"
+        "name": "Canal Period consumption"
       },
       "meter_reading": {
-        "name": "Meter reading"
+        "name": "Canal Meter reading"
       },
       "cumulative_cost": {
-        "name": "Cumulative cost"
+        "name": "Canal Cumulative cost"
       },
       "current_price": {
-        "name": "Current price"
+        "name": "Canal Current price"
       },
       "current_block": {
-        "name": "Current tariff block"
+        "name": "Canal Current tariff block"
       }
     }
   },
