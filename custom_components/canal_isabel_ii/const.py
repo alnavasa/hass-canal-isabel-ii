@@ -72,6 +72,13 @@ CONF_CUOTA_SUPL_ALC = "cuota_supl_alc_eur_m3"
 #: integration release.
 CONF_IVA_PCT = "iva_pct"
 
+#: One-shot migration flag set on first boot under v0.5.4. When False
+#: (or missing — pre-v0.5.4 entries don't have it), :func:`async_setup_entry`
+#: clears any previously-stored cost statistics so the new spike-immune
+#: push path can rebuild them from a clean, monotonic series. See the
+#: long-form rationale in ``__init__.py:_migrate_cost_stats_v054``.
+CONF_COST_STATS_MIGRATED = "cost_stats_v054_migrated"
+
 
 # ---------------------------------------------------------------------
 # Defaults

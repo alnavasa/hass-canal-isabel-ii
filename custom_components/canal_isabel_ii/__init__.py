@@ -39,9 +39,11 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.recorder import get_instance as get_recorder_instance
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .bookmarklet import (
@@ -52,6 +54,7 @@ from .bookmarklet import (
 )
 from .bookmarklet_view import CanalBookmarkletPageView
 from .const import (
+    CONF_COST_STATS_MIGRATED,
     CONF_CUOTA_SUPL_ALC,
     CONF_DIAMETRO_MM,
     CONF_ENABLE_COST,
@@ -65,6 +68,7 @@ from .const import (
     DEFAULT_IVA_PCT,
     DEFAULT_N_VIVIENDAS,
     DOMAIN,
+    STATISTICS_SOURCE,
 )
 from .coordinator import CanalCoordinator
 from .ingest import CanalIngestView
@@ -193,6 +197,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     store = ReadingStore(hass, entry.entry_id)
     await store.async_load()
 
+    # v0.5.4 one-shot migration. Pre-v0.5.4 entries had cost stats that
+    # mixed HA's auto-generated values (from ``state_class=total_increasing``)
+    # with the explicit push added in v0.5.2 — leaving non-monotonic
+    # series that the Energy panel renders as 0 € for old periods or
+    # huge negative bars where the two paths diverged. We clear those
+    # stats once so the new spike-immune push (see
+    # ``CanalCumulativeCostSensor._submit_running_stats``) can rebuild
+    # them from a clean slate. Idempotent via the ``CONF_COST_STATS_MIGRATED``
+    # flag — runs at most once per entry.
+    if not entry.data.get(CONF_COST_STATS_MIGRATED):
+        await _migrate_cost_stats_v054(hass, entry, store)
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_COST_STATS_MIGRATED: True},
+        )
+
     coordinator = CanalCoordinator(hass, entry, store)
     # First refresh just publishes what's already in the store; never
     # raises. Skipping ``async_config_entry_first_refresh`` because we
@@ -233,6 +253,96 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _publish_bookmarklet_notification(hass, entry)
 
     return True
+
+
+async def _migrate_cost_stats_v054(
+    hass: HomeAssistant, entry: ConfigEntry, store: ReadingStore
+) -> None:
+    """One-shot v0.5.4 migration: clear stale cost statistics for this entry.
+
+    ## Why
+
+    ``sensor.<…>_coste_acumulado`` is declared
+    ``state_class = TOTAL_INCREASING`` so HA's recorder auto-generates
+    long-term statistics for it from the entity's state stream. That
+    auto-generation began **the moment the cost feature was first
+    enabled**, with whatever ``native_value`` the sensor had at that
+    instant — which only reflects what's in ``coordinator.data`` (a
+    rolling window capped by ``MAX_READINGS_PER_ENTRY``).
+
+    v0.5.2 added a parallel ``async_import_statistics`` push to the
+    same ``statistic_id``. Both writers are upserts by
+    ``(statistic_id, start)``, but they only overlap on the hours our
+    push covers — every hour outside that window keeps the
+    auto-generated ``sum``. Result: a series with two regimes glued
+    together, frequently non-monotonic at the seam.
+
+    The Energy panel renders each bar as ``sum[n] - sum[n-1]``, so a
+    drop at the seam becomes a large negative bar (sometimes hundreds
+    of euros), and a series that auto-gen never reached becomes 0 €
+    for the entire historical period before the cost-feature toggle.
+
+    ## What we do
+
+    For every contract present in this entry's store, drop both:
+
+    1. ``canal_isabel_ii:cost_<contract>`` — external statistic.
+    2. ``sensor.<…>_coste_acumulado`` — entity statistic, looked up
+       via the entity registry by its unique_id (the actual
+       ``entity_id`` may differ from the default if the user renamed
+       the entity).
+
+    The next coordinator tick fires
+    ``CanalCumulativeCostSensor._handle_coordinator_update`` which
+    pushes a from-scratch monotonic series via the spike-immune path.
+
+    ## Idempotency
+
+    Caller sets ``entry.data[CONF_COST_STATS_MIGRATED] = True`` after
+    we return, so a restart never re-clears. A user who deliberately
+    wants to re-trigger the migration can flip that flag in
+    ``.storage/core.config_entries`` and reboot — but the spike-immune
+    push should make that unnecessary.
+    """
+    contracts = sorted({r.contract for r in store.readings if r.contract})
+    if not contracts:
+        # Brand-new entry (no bookmarklet POST yet) or genuinely
+        # contract-less — nothing to clear. The flag still gets set
+        # by the caller so we don't keep re-scanning on every boot.
+        return
+
+    stat_ids: list[str] = []
+
+    # External statistic ids — deterministic from the contract id.
+    for contract in contracts:
+        stat_ids.append(f"{STATISTICS_SOURCE}:cost_{contract}")
+
+    # Entity statistic ids — resolve via the entity registry by the
+    # unique_id the cost sensor stamps on itself in
+    # ``CanalCumulativeCostSensor.__init__``. If the user renamed the
+    # entity, this still finds it; if the entity was never created
+    # (cost feature never enabled) we get None and skip cleanly.
+    ent_reg = er.async_get(hass)
+    for contract in contracts:
+        unique_id = f"canal_isabel_ii_{contract}_cumulative_cost"
+        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
+        if entity_id:
+            stat_ids.append(entity_id)
+
+    if not stat_ids:
+        return
+
+    _LOGGER.info(
+        "[%s] v0.5.4 cost-stats migration: clearing %d statistic_ids: %s",
+        entry.entry_id,
+        len(stat_ids),
+        stat_ids,
+    )
+    # ``async_clear_statistics`` is a callback that queues a recorder
+    # task — fire-and-forget. The next push will see ``last_start=None``
+    # and go through the cold-start path.
+    recorder = get_recorder_instance(hass)
+    recorder.async_clear_statistics(stat_ids)
 
 
 def _resolve_cost_settings(entry: ConfigEntry) -> dict[str, Any]:

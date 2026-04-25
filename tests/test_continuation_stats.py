@@ -41,6 +41,7 @@ _helpers = _load_helper_module()
 continuation_stats = _helpers.continuation_stats
 needs_backfill = _helpers.needs_backfill
 merge_forward_and_backfill = _helpers.merge_forward_and_backfill
+cumulative_to_deltas = _helpers.cumulative_to_deltas
 
 
 # Same conftest.py override trick as in test_meter_summary_parser.py:
@@ -421,3 +422,72 @@ class TestMergeForwardAndBackfill:
         assert bars[5:] == [10.0, 20.0, 30.0, 40.0, 50.0]
         # Chronology preserved.
         assert ts_list == [_hour(h) for h in list(range(5)) + list(range(10, 15))]
+
+
+# =====================================================================
+# cumulative_to_deltas — the cost-stream inverse used by v0.5.4 cost push
+# =====================================================================
+
+
+class TestCumulativeToDeltas:
+    """``compute_hourly_cost_stream`` produces a cumulative-€ series; the
+    cost push needs deltas so it can feed ``merge_forward_and_backfill``.
+    These tests pin the inverse transform behaviour.
+    """
+
+    def test_empty_input_returns_empty(self):
+        assert cumulative_to_deltas([]) == []
+
+    def test_first_row_delta_equals_its_cumulative(self):
+        """Treats the series as starting from zero — so the first
+        row's delta is its absolute value. This matches what
+        ``merge_forward_and_backfill`` expects (it replays from zero
+        too)."""
+        items = [(_hour(0), 10.0), (_hour(1), 25.0), (_hour(2), 30.0)]
+        out = cumulative_to_deltas(items)
+        assert out == [(_hour(0), 10.0), (_hour(1), 15.0), (_hour(2), 5.0)]
+
+    def test_round_trip_through_merge_recovers_bars(self):
+        """The whole point: feed cumulative → deltas → merge_replay →
+        bars equal the deltas. This is the property the cost push
+        relies on for the Energy panel to render correct heights."""
+        # Cumulative cost stream with three increments: 5, 7, 3 €.
+        items = [(_hour(0), 5.0), (_hour(1), 12.0), (_hour(2), 15.0)]
+        deltas = cumulative_to_deltas(items)
+        # Empty existing → cold replay through the merge.
+        merged = merge_forward_and_backfill(deltas, existing_rows=[])
+        sums = [s for _, s in merged]
+        bars = [sums[0]] + [sums[i] - sums[i - 1] for i in range(1, len(sums))]
+        assert bars == [5.0, 7.0, 3.0]
+
+    def test_zero_delta_hour_emitted(self):
+        """A flat hour (no cuota fija accrual happens to align with no
+        consumption — exotic but possible) emits a 0.0-delta row, NOT
+        a skipped slot. Skipping would create a gap in the recorder
+        series."""
+        items = [(_hour(0), 5.0), (_hour(1), 5.0), (_hour(2), 7.0)]
+        out = cumulative_to_deltas(items)
+        assert out == [(_hour(0), 5.0), (_hour(1), 0.0), (_hour(2), 2.0)]
+
+    def test_defensive_negative_delta_clamped_to_zero(self):
+        """The cost stream is monotonic by construction, but if a future
+        caller (or rounding artefact) feeds a non-monotonic series, the
+        delta must clamp to 0.0 — never propagate a negative bar into
+        the merge replay."""
+        items = [(_hour(0), 10.0), (_hour(1), 8.0), (_hour(2), 12.0)]
+        out = cumulative_to_deltas(items)
+        # Second row would be -2.0 raw → clamped to 0.0. Third row
+        # follows from the *raw* prev (8.0), not the clamped one,
+        # giving 12 - 8 = 4.0 — keeps the series faithful to where
+        # the cumulative actually went, just without negative bars.
+        assert out == [(_hour(0), 10.0), (_hour(1), 0.0), (_hour(2), 4.0)]
+
+    def test_preserves_input_order(self):
+        """Sorting is the merge function's responsibility (it sorts
+        internally). This helper keeps input order so callers can spot
+        an unsorted input by reading the output without reasoning
+        about a hidden sort."""
+        items = [(_hour(2), 10.0), (_hour(0), 3.0), (_hour(1), 7.0)]
+        out = cumulative_to_deltas(items)
+        # Input order: index-by-index, not chronological.
+        assert [ts for ts, _ in out] == [_hour(2), _hour(0), _hour(1)]

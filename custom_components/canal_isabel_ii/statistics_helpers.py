@@ -71,6 +71,40 @@ def continuation_stats(
     return out
 
 
+def cumulative_to_deltas(
+    items: list[tuple[datetime, float]],
+) -> list[tuple[datetime, float]]:
+    """Invert a monotonic cumulative series into per-hour deltas.
+
+    The cost stream produced by ``compute_hourly_cost_stream`` is
+    *already cumulative* (``cumulative_eur`` per hour). To feed it
+    into :func:`merge_forward_and_backfill` — which operates on
+    deltas and replays from zero — we need the inverse transform:
+    ``delta[i] = cumulative[i] - cumulative[i-1]``, with the first
+    row's delta being its own absolute value (treats the series as
+    starting from zero, matching the merge function's semantics).
+
+    Defensive: a non-monotonic input row (``cum[i] < cum[i-1]``)
+    emits a 0.0 delta rather than a negative one. The cost stream is
+    monotonic by construction (cuota fija + non-negative variable),
+    so this clamp never fires in production — but it keeps the
+    helper resilient against future callers and against any rounding
+    artefact that might produce a tiny negative delta.
+
+    Output order matches input order. Sorting is the caller's job
+    (or the merge function's, since it sorts internally).
+    """
+    out: list[tuple[datetime, float]] = []
+    prev = 0.0
+    for ts, cum in items:
+        d = cum - prev
+        if d < 0:
+            d = 0.0
+        out.append((ts, d))
+        prev = cum
+    return out
+
+
 def needs_backfill(
     items: list[tuple[datetime, float]],
     last_start: datetime | None,

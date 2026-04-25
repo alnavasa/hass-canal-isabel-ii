@@ -54,6 +54,7 @@ from .coordinator import CanalCoordinator
 from .models import MeterSummary, Reading
 from .statistics_helpers import (
     continuation_stats,
+    cumulative_to_deltas,
     merge_forward_and_backfill,
     needs_backfill,
 )
@@ -807,10 +808,15 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
            historical cost.
 
         Both writes are upserts by ``(statistic_id, start)``, so
-        re-running this on every coordinator update is cheap and idem-
-        potent. Backfill semantics mirror the consumption push: any
-        timestamp at or before the last stored ``start`` triggers a
-        full replay of the series; otherwise we filter forward-only.
+        re-running this on every coordinator update is cheap and
+        idempotent. The merge semantics inside
+        :meth:`_submit_running_stats` are spike-immune: cold start is
+        a direct push of the cumulative series; every subsequent push
+        replays the merged delta series from zero, which keeps the
+        Energy panel's per-hour bars (``sum[n] - sum[n-1]``) correct
+        even if a previous version's stats are still mixed in (the
+        ``__init__.py`` migration clears those once on first boot of
+        v0.5.4 so this push only ever has clean values to merge with).
         """
         stream = self._cost_stream()
         if not stream:
@@ -866,14 +872,64 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         items: list[tuple[datetime, float]],
         pusher,
     ) -> None:
-        """Common path: read last stat, decide backfill vs forward, push.
+        """Push the cumulative-€ series with spike-immune merge semantics.
 
-        ``pusher`` is either ``async_add_external_statistics`` (for
+        ``items`` is ``[(ts_utc, cumulative_eur), ...]``, already
+        monotonic by construction (output of
+        :func:`compute_hourly_cost_stream`).
+
+        ``pusher`` is either :func:`async_add_external_statistics` (for
         ``source != "recorder"`` external sources) or
-        ``async_import_statistics`` (for ``source == "recorder"`` entity
-        sources). Both have identical signatures and are fire-and-forget.
+        :func:`async_import_statistics` (for ``source == "recorder"``
+        entity sources). Identical signatures — fire-and-forget.
+
+        ## Strategy (mirrors the consumption push)
+
+        1. **Cumulative → delta.** ``compute_hourly_cost_stream``
+           emits a running total; :func:`merge_forward_and_backfill`
+           consumes deltas. :func:`cumulative_to_deltas` is the
+           inverse.
+        2. **Cold start (no prior stats).** Push the cumulative
+           series as-is — the cost stream is monotonic so
+           ``state=cum, sum=cum`` is a valid LTS write that the
+           Energy panel renders correctly. Cheaper than a full
+           replay on the very first push.
+        3. **Have prior stats.** Read the existing recorder series,
+           merge the new deltas with the old (new wins on
+           timestamp collision), replay from zero, push the whole
+           merged series.
+
+        ## Why always replay (after the first push)
+
+        The cost stream covers from the **earliest cached reading**
+        on every coordinator tick — not just the new hours. So
+        ``items[0].ts`` is almost always ``<= last_start`` after the
+        first push. A rolling-forward filter would silently drop
+        every row. Always-replay is the only correct mode.
+
+        ## Why this fixes the v0.5.2 bugs
+
+        Pre-v0.5.4, the Energy panel rendered:
+
+        - ``0 €`` for periods predating the cost-feature toggle
+          (HA's auto-generated stats only started at toggle time;
+          the explicit push only covered what the cache held).
+        - **Negative bars** at the seam between auto-generated and
+          explicitly-pushed values (different baselines, same
+          ``statistic_id``).
+
+        v0.5.4 first runs a one-shot migration in ``__init__.py``
+        that drops the conflicting series, then this push rebuilds
+        them as a single zero-anchored monotonic series. Subsequent
+        pushes always replay-from-zero so any future inconsistency
+        self-heals on the next coordinator tick.
         """
         statistic_id = metadata["statistic_id"]
+
+        # 1) Cumulative € → per-hour delta.
+        deltas = cumulative_to_deltas(items)
+
+        # 2) Read the most recent stored stat to decide cold-start vs replay.
         recorder = get_recorder_instance(self.hass)
         last_stats = await recorder.async_add_executor_job(
             get_last_statistics,
@@ -892,30 +948,70 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
             elif raw_start is not None:
                 last_start = dt_util.parse_datetime(str(raw_start))
 
-        if needs_backfill([(ts, 0.0) for ts, _ in items], last_start):
+        # 3a) Cold start — no prior stats. The cumulative series is
+        # already monotonic, push it as `state=cum, sum=cum` directly.
+        if last_start is None:
+            if not items:
+                return
             stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in items]
             _LOGGER.info(
-                "%s: backfill — replaying %d hourly cost stats",
+                "%s: cold start — importing %d hourly cost stats",
                 statistic_id,
                 len(stats),
             )
             pusher(self.hass, metadata, stats)
             return
 
-        new_items = [(ts, v) for ts, v in items if last_start is None or ts > last_start]
-        if not new_items:
+        # 3b) Have prior stats — read them, merge with new deltas,
+        # replay from zero, upsert the whole thing.
+        if not deltas:
+            return
+        earliest_new = min(ts for ts, _ in deltas)
+        # Pad an hour back so the row immediately before the earliest
+        # new item is included in the replay (mirrors the consumption
+        # backfill — keeps the replay seamlessly continuous).
+        query_from = earliest_new - timedelta(hours=1)
+        existing_raw = await recorder.async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            query_from,
+            None,  # end_time: up to now
+            {statistic_id},
+            "hour",
+            None,  # default units
+            {"sum"},
+        )
+        existing_rows: list[tuple[datetime, float]] = []
+        for row in (existing_raw or {}).get(statistic_id, []):
+            raw_start = row.get("start") or row.get("end")
+            if raw_start is None:
+                continue
+            if isinstance(raw_start, (int, float)):
+                ts = dt_util.utc_from_timestamp(float(raw_start))
+            else:
+                ts = dt_util.parse_datetime(str(raw_start))
+                if ts is None:
+                    continue
+            running = row.get("sum")
+            if running is None:
+                continue
+            existing_rows.append((ts, float(running)))
+
+        merged = merge_forward_and_backfill(deltas, existing_rows)
+        if not merged:
             _LOGGER.debug(
-                "%s: no new hourly cost rows to import (last_start=%s)",
+                "%s: merge produced empty series — skipping push",
                 statistic_id,
-                last_start,
             )
             return
 
-        stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in new_items]
+        stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in merged]
         _LOGGER.debug(
-            "%s: importing %d new hourly cost stats",
+            "%s: replaying %d hourly cost stats (merged %d new with %d existing)",
             statistic_id,
             len(stats),
+            len(deltas),
+            len(existing_rows),
         )
         pusher(self.hass, metadata, stats)
 

@@ -3,6 +3,58 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.4] — 2026-04-25
+
+### Arreglado
+
+- **Panel de Energía mostraba costes incoherentes** con dos síntomas
+  habituales tras llevar varias versiones instalado:
+  - Sólo aparecía coste del **último periodo**, con todos los meses
+    anteriores a 0 € (aunque sí hubiera consumo).
+  - Aparecían **barras negativas gigantes** (típicamente en el último
+    mes), en algunas instalaciones del orden de varios cientos de €.
+
+  Ambos eran la misma causa raíz: el sensor `Coste acumulado` está
+  marcado `state_class = total_increasing`, así que el *recorder* de HA
+  auto-generaba estadísticas long-term para él **a partir del momento
+  en que se activó la feature**, usando el `state` de cada hora. Cuando
+  v0.5.2 añadió el push explícito vía `async_import_statistics` al
+  mismo `statistic_id`, ambos caminos competían: el push solo
+  sobrescribía las horas que cubría su stream, y las que no, conservaban
+  el `sum` anterior — produciendo series **no monótonas** que el panel
+  renderiza como `bar = sum[n] - sum[n-1] = NEGATIVO`.
+
+  La v0.5.4 ataca el problema por dos lados:
+
+  - **Migración one-shot al primer arranque**: limpia las
+    estadísticas existentes (entidad + externa) para cada contrato del
+    entry. Idempotente vía un flag persistente `cost_stats_v054_migrated`
+    en `entry.data` — corre exactamente una vez por instalación. Al
+    siguiente tick del coordinator, el push reconstruye desde cero.
+  - **Push de coste con réplica completa "spike-immune"**: igual que
+    el push de consumo desde la incidencia de octubre 2025, ahora el
+    push de coste convierte la serie acumulativa a *deltas*, lee la
+    serie existente, las funde (gana lo nuevo en colisión) y reescribe
+    la serie completa replayed-from-zero. El panel solo lee
+    `sum[n] - sum[n-1]`, así que el offset absoluto es invisible y
+    cada barra queda correcta. Cualquier divergencia futura entre
+    fuentes auto-rellena en lugar de propagarse.
+
+### Añadido
+
+- `cumulative_to_deltas()` en `statistics_helpers.py` — invierte una
+  serie monótona acumulada en *deltas* por hora, defensivo contra
+  regresiones del input (clampa negativos a 0). Cubierto por
+  `tests/test_continuation_stats.py::TestCumulativeToDeltas`.
+
+### Notas
+
+- **No hay que tocar nada manualmente.** La migración corre sola al
+  primer arranque tras actualizar; las stats limpias se rellenan al
+  siguiente tick del coordinator (en cuanto pulses el bookmarklet o
+  pase la próxima hora). El panel de Energía debería mostrar el
+  histórico completo y monótono inmediatamente.
+
 ## [0.5.3] — 2026-04-25
 
 ### Arreglado
