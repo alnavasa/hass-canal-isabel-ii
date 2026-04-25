@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -330,6 +331,14 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_total"
         # Remembered across HA restarts so we never report below it.
         self._restored_value: float | None = None
+        # Serialises every call to ``_push_statistics`` for THIS entity.
+        # Without it, the initial push scheduled from
+        # ``async_added_to_hass`` could overlap with a coordinator-driven
+        # push triggered by a POST that arrives milliseconds later — both
+        # tasks would do their own read-modify-write cycle against the
+        # recorder and race the ``last_sum`` lookup. Lock is per-entity
+        # (per-contract); two entities can still push in parallel.
+        self._push_lock = asyncio.Lock()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -426,7 +435,20 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         start)``, so the full-replay write overwrites every row
         we've already stored with its (unchanged-modulo-offset) value
         and inserts the new rows where they belong.
+
+        ## Concurrency
+
+        Wrapped in ``self._push_lock`` (per-entity asyncio.Lock) so the
+        initial push scheduled from ``async_added_to_hass`` cannot race
+        with a coordinator-driven push fired milliseconds later — both
+        do their own read-modify-write against the recorder and would
+        otherwise interleave their ``get_last_statistics`` lookup with
+        the other's write.
         """
+        async with self._push_lock:
+            await self._push_statistics_locked()
+
+    async def _push_statistics_locked(self) -> None:
         rows = self._sorted_rows()
         if not rows:
             return
@@ -731,6 +753,12 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         self._attr_name = "Canal Coste acumulado"
         self._attr_unique_id = f"canal_isabel_ii_{contract_id}_cumulative_cost"
         self._restored_value: float | None = None
+        # Same rationale as the consumption sensor's ``_push_lock``:
+        # serialise every call to ``_push_cost_statistics`` for THIS
+        # entity so the initial push from ``async_added_to_hass`` and a
+        # coordinator-driven push that arrives at the same time can't
+        # interleave their recorder read-modify-write cycles.
+        self._push_lock = asyncio.Lock()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -849,7 +877,22 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         even if a previous version's stats are still mixed in (the
         ``__init__.py`` migration clears those once on first boot of
         v0.5.4 so this push only ever has clean values to merge with).
+
+        ## Concurrency
+
+        Wrapped in ``self._push_lock`` (per-entity asyncio.Lock) so the
+        initial push fired from ``async_added_to_hass`` cannot race a
+        coordinator-driven push that arrives milliseconds later. Both
+        invoke :meth:`_submit_running_stats` which does its own
+        read-modify-write against the recorder; without the lock the
+        two would interleave their ``statistics_during_period`` lookup
+        with the other's pending write, producing inconsistent merged
+        deltas.
         """
+        async with self._push_lock:
+            await self._push_cost_statistics_locked()
+
+    async def _push_cost_statistics_locked(self) -> None:
         stream = self._cost_stream()
         if not stream:
             return

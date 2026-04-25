@@ -3,6 +3,36 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.10] — 2026-04-25
+
+### Arreglado
+
+- **Race condition entre el push inicial de estadísticas y un POST
+  concurrente.** El push de *long-term statistics* se dispara desde
+  dos sitios:
+
+  1. `async_added_to_hass` cuando la entidad se añade por primera vez
+     tras un *reload* del *entry* (por ejemplo después del primer POST
+     del bookmarklet).
+  2. El listener de `_handle_coordinator_update` cuando llega cada
+     POST posterior y el *coordinator* propaga datos nuevos.
+
+  Si el segundo POST llegaba en los milisegundos que el primer push
+  estaba dentro de `get_last_statistics` / `statistics_during_period`,
+  los dos *tasks* paralelos hacían su propio ciclo de
+  *read-modify-write* contra el *recorder* y entrelazaban su lectura
+  con la escritura del otro. El resultado eran *deltas* fusionadas
+  inconsistentes (sumas mal calculadas en el panel Energía) y, en el
+  peor caso, una entrada con `start` duplicado que el *upsert* del
+  *recorder* tolera pero deja la serie con un valor *intermedio*.
+
+  Solución: cada entidad lleva su propio `asyncio.Lock` (`_push_lock`)
+  que serializa **TODA** invocación a `_push_statistics` y
+  `_push_cost_statistics` para esa entidad. Los pushes de entidades
+  distintas siguen pudiendo ejecutarse en paralelo (un *lock* por
+  contrato, no global). Patrón estándar para serializar
+  *read-modify-write* en `asyncio`.
+
 ## [0.5.9] — 2026-04-25
 
 ### Arreglado
