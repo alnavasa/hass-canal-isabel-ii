@@ -72,6 +72,7 @@ split_into_blocks = _tariff.split_into_blocks
 variable_cost_eur = _tariff.variable_cost_eur
 cuota_servicio_eur = _tariff.cuota_servicio_eur
 compute_period_total_cost = _tariff.compute_period_total_cost
+_split_period_by_vigencia = _tariff._split_period_by_vigencia
 bimonth_for = _tariff.bimonth_for
 compute_hourly_cost_stream = _tariff.compute_hourly_cost_stream
 
@@ -415,3 +416,185 @@ class TestHourlyCostStream:
                 "if vigencia coverage was extended, update this test "
                 "with a date still outside every known vigencia."
             )
+
+
+# ---------------------------------------------------------------------
+# Vigencia boundary (2025 → 2026, on 2026-01-01)
+# ---------------------------------------------------------------------
+#
+# These tests exist because Bug 2.1 of the v0.5.x audit identified the
+# vigencia transition as a high-risk corner: it is the only date where
+# two ``TariffSet`` entries meet, and any off-by-one in the half-open
+# interval logic of ``_split_period_by_vigencia`` (or in the bimonth
+# alignment that feeds it) silently shifts costs to the wrong tariff.
+#
+# Specifically guarded:
+#
+# 1. Half-open semantics — ``valid_until`` is EXCLUSIVE, so a period
+#    ending exactly on the boundary must NOT spill a one-day segment
+#    into the next vigencia.
+# 2. A period that starts EXACTLY at the boundary lives entirely in
+#    the new vigencia (no zero-length segment of the old one).
+# 3. A period that genuinely STRADDLES the boundary splits cleanly into
+#    two segments whose day-counts add up to the original DP, so the
+#    pro-rate-by-days math in ``compute_period_total_cost`` doesn't
+#    leak m³ across vigencias.
+# 4. Cost-stream monotonicity holds across the boundary — the cost
+#    sensor is ``state_class=total_increasing`` and any non-monotone
+#    blip would be misread by the recorder as a meter reset.
+# 5. A two-bimonth stream (Nov-Dec 2025 + Jan-Feb 2026) summed across
+#    every hour matches the sum of the two per-bimonth period totals,
+#    so the Energy panel keeps adding up to the bill.
+class TestVigenciaBoundary:
+    BOUNDARY = date(2026, 1, 1)
+
+    def test_split_ends_exactly_on_boundary_is_one_segment(self):
+        # Nov-Dec 2025 bimonth ends exactly on 2026-01-01. Because
+        # ``valid_until`` is exclusive, the entire period must live in
+        # the 2025 vigencia — no spurious 0-day tail in 2026.
+        segments = _split_period_by_vigencia(date(2025, 11, 1), self.BOUNDARY)
+        assert len(segments) == 1, f"expected 1 segment, got {segments!r}"
+        seg_start, seg_end, vigencia = segments[0]
+        assert seg_start == date(2025, 11, 1)
+        assert seg_end == self.BOUNDARY
+        assert vigencia.valid_from == date(2025, 1, 1), (
+            "boundary-aligned end must NOT promote the segment to the "
+            "next vigencia — half-open interval semantics violated"
+        )
+
+    def test_split_starts_exactly_on_boundary_is_2026_only(self):
+        # Jan-Feb 2026 bimonth starts exactly on 2026-01-01 → fully in
+        # the 2026 vigencia, with no leading 0-day segment of 2025.
+        segments = _split_period_by_vigencia(self.BOUNDARY, date(2026, 3, 1))
+        assert len(segments) == 1, f"expected 1 segment, got {segments!r}"
+        seg_start, seg_end, vigencia = segments[0]
+        assert seg_start == self.BOUNDARY
+        assert seg_end == date(2026, 3, 1)
+        assert vigencia.valid_from == self.BOUNDARY, (
+            "period starting on the boundary must use the 2026 vigencia"
+        )
+
+    def test_split_straddling_boundary_splits_cleanly(self):
+        # A synthetic 60-day period centered on the boundary
+        # (2025-12-02 → 2026-01-31) MUST split into two segments whose
+        # DPs add up to 60 — otherwise pro-rate-by-days in
+        # ``compute_period_total_cost`` would misallocate consumption.
+        period_start = date(2025, 12, 2)
+        period_end = date(2026, 1, 31)
+        segments = _split_period_by_vigencia(period_start, period_end)
+        assert len(segments) == 2, f"expected 2 segments, got {segments!r}"
+
+        s1_start, s1_end, v1 = segments[0]
+        s2_start, s2_end, v2 = segments[1]
+
+        # Segment 1: Dec 2025 → boundary (exclusive), 2025 vigencia.
+        assert s1_start == period_start
+        assert s1_end == self.BOUNDARY
+        assert v1.valid_from == date(2025, 1, 1)
+
+        # Segment 2: boundary → Jan 31 2026, 2026 vigencia.
+        assert s2_start == self.BOUNDARY
+        assert s2_end == period_end
+        assert v2.valid_from == self.BOUNDARY
+
+        # Day counts add up to the original DP — no fence-post error.
+        total_dp = (period_end - period_start).days
+        seg_dp_sum = (s1_end - s1_start).days + (s2_end - s2_start).days
+        assert seg_dp_sum == total_dp, (
+            f"segment DPs {seg_dp_sum} ≠ period DP {total_dp} — "
+            f"day accounting leaks across the vigencia boundary"
+        )
+
+    def test_compute_period_total_uses_both_vigencias(self):
+        # An explicit straddling period priced via
+        # ``compute_period_total_cost`` MUST be different from the same
+        # consumption priced entirely under either vigencia, otherwise
+        # the split is silently using just one tariff (either by sorting
+        # the segments out, or by collapsing them).
+        params = TariffParams(diametro_mm=15, n_viviendas=1)
+        period_start = date(2025, 12, 2)
+        period_end = date(2026, 1, 31)
+        consumo_m3 = 20.0  # straddles B1/B2 either side of the boundary
+
+        priced_split = compute_period_total_cost(
+            consumo_m3=consumo_m3,
+            period_start=period_start,
+            period_end=period_end,
+            params=params,
+        )
+        priced_2025_only = compute_period_total_cost(
+            consumo_m3=consumo_m3,
+            period_start=date(2025, 11, 2),  # same DP, fully in 2025
+            period_end=date(2025, 12, 31),
+            params=params,
+        )
+        priced_2026_only = compute_period_total_cost(
+            consumo_m3=consumo_m3,
+            period_start=date(2026, 2, 1),  # same DP, fully in 2026
+            period_end=date(2026, 4, 1),  # 60-day window, all in 2026
+            params=params,
+        )
+        # The straddling total must lie strictly between the two
+        # single-vigencia totals (or equal one if the tariffs happen to
+        # match, but that would be a regression in the constants table).
+        lo, hi = sorted([priced_2025_only.total_eur, priced_2026_only.total_eur])
+        assert lo - 0.01 <= priced_split.total_eur <= hi + 0.01, (
+            f"straddling period priced {priced_split.total_eur:.4f} € "
+            f"falls outside [{lo:.4f}, {hi:.4f}] — split is broken"
+        )
+
+    def test_hourly_cost_monotone_across_boundary(self):
+        # Twelve hours straddling 2026-01-01 00:00 — six on each side.
+        # The cumulative cost in the stream is fed to the recorder as
+        # ``state_class=total_increasing``; a single non-monotone tick
+        # would be flagged as a meter reset and lose data.
+        params = TariffParams(diametro_mm=15, n_viviendas=1, cuota_supl_alc_eur_m3=0.1)
+        t0 = datetime(2025, 12, 31, 18, 0, 0)
+        readings = [(t0 + timedelta(hours=i), 5.0) for i in range(12)]
+        stream = compute_hourly_cost_stream(readings, params)
+        assert len(stream) == 12
+        prev_eur = -1.0
+        for row in stream:
+            assert row.cumulative_eur > prev_eur, (
+                f"non-monotone cumulative at {row.timestamp.isoformat()} "
+                f"({row.cumulative_eur:.6f} ≤ {prev_eur:.6f}) — recorder "
+                f"would treat this as a meter reset"
+            )
+            prev_eur = row.cumulative_eur
+
+    def test_hourly_stream_two_bimonths_sum_matches_period_totals(self):
+        # Sweep two consecutive bimonths split by the vigencia boundary
+        # (Nov-Dec 2025 + Jan-Feb 2026) at one reading per hour. The
+        # final ``cumulative_eur`` of the stream MUST equal the sum of
+        # ``compute_period_total_cost`` for each bimonth — that's the
+        # invariant the bill reconstruction depends on.
+        params = TariffParams(diametro_mm=15, n_viviendas=1, cuota_supl_alc_eur_m3=0.1)
+        bm1_start, bm1_end = date(2025, 11, 1), date(2026, 1, 1)
+        bm2_start, bm2_end = date(2026, 1, 1), date(2026, 3, 1)
+        liters_per_hour = 50.0
+        bm1_hours = (bm1_end - bm1_start).days * 24
+        bm2_hours = (bm2_end - bm2_start).days * 24
+        bm1_m3 = liters_per_hour * bm1_hours / 1000.0
+        bm2_m3 = liters_per_hour * bm2_hours / 1000.0
+
+        readings = [
+            (
+                datetime.combine(bm1_start, datetime.min.time()) + timedelta(hours=i),
+                liters_per_hour,
+            )
+            for i in range(bm1_hours + bm2_hours)
+        ]
+        stream = compute_hourly_cost_stream(readings, params)
+
+        bm1_total = compute_period_total_cost(
+            consumo_m3=bm1_m3, period_start=bm1_start, period_end=bm1_end, params=params
+        )
+        bm2_total = compute_period_total_cost(
+            consumo_m3=bm2_m3, period_start=bm2_start, period_end=bm2_end, params=params
+        )
+        expected = bm1_total.total_eur + bm2_total.total_eur
+        assert abs(stream[-1].cumulative_eur - expected) < 0.02, (
+            f"stream end {stream[-1].cumulative_eur:.4f} € ≠ sum of "
+            f"per-bimonth totals {expected:.4f} € — vigencia boundary "
+            f"breaks the bill-reconstruction invariant"
+        )

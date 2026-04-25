@@ -205,8 +205,7 @@ class ReadingStore:
                 trimmed = self._readings[k]
                 if trimmed.contract:
                     self._baseline_liters[trimmed.contract] = (
-                        self._baseline_liters.get(trimmed.contract, 0.0)
-                        + trimmed.liters
+                        self._baseline_liters.get(trimmed.contract, 0.0) + trimmed.liters
                     )
                 del self._readings[k]
 

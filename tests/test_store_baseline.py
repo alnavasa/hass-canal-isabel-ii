@@ -119,11 +119,13 @@ def test_trim_accumulates_baseline_liters():
     contract.
     """
     store = ReadingStore(MagicMock(), "test_entry")
-    asyncio.run(store.async_replace(
-        _make_readings(MAX_READINGS + 100),
-        meter_summary=None,
-        ingest_at=datetime(2026, 1, 1),
-    ))
+    asyncio.run(
+        store.async_replace(
+            _make_readings(MAX_READINGS + 100),
+            meter_summary=None,
+            ingest_at=datetime(2026, 1, 1),
+        )
+    )
     assert len(store.readings) == MAX_READINGS
     assert store.baseline_liters == {"C1": 100.0}, (
         f"expected 100 L baseline, got {store.baseline_liters!r}"
@@ -153,11 +155,13 @@ def test_baseline_separates_per_contract():
         )
         for r in rows_b
     ]
-    asyncio.run(store.async_replace(
-        rows_a + rows_b,
-        meter_summary=None,
-        ingest_at=datetime(2026, 1, 1),
-    ))
+    asyncio.run(
+        store.async_replace(
+            rows_a + rows_b,
+            meter_summary=None,
+            ingest_at=datetime(2026, 1, 1),
+        )
+    )
     # Total trimmed = (MAX + 100) - MAX = 100 readings, distributed
     # between A and B by oldest-first. Both contracts should have a
     # non-zero baseline.
@@ -179,11 +183,13 @@ def test_baseline_serialises_and_round_trips():
     re-read produces identical state.
     """
     store = ReadingStore(MagicMock(), "test_entry")
-    asyncio.run(store.async_replace(
-        _make_readings(MAX_READINGS + 25),
-        meter_summary=None,
-        ingest_at=datetime(2026, 1, 1),
-    ))
+    asyncio.run(
+        store.async_replace(
+            _make_readings(MAX_READINGS + 25),
+            meter_summary=None,
+            ingest_at=datetime(2026, 1, 1),
+        )
+    )
     serialised = store._serialise()
     assert "baseline_liters" in serialised
     assert serialised["baseline_liters"] == {"C1": 25.0}

@@ -3,6 +3,46 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.13] — 2026-04-25
+
+### Añadido
+
+- **Tests explícitos del límite de vigencia 2025 → 2026.** `tariff.py`
+  modela el corte de tarifa el `2026-01-01` mediante intervalos
+  semi-abiertos en `_split_period_by_vigencia`. Esa lógica nunca tuvo
+  cobertura directa: las dos *bills* reales del *fixture*
+  `TestRealBillValidation` caen ambas dentro de la misma vigencia y la
+  protegían sólo de forma indirecta.
+
+  Nueva clase `TestVigenciaBoundary` con seis tests que cubren los
+  casos que un cambio en la tabla `VIGENCIAS` o en la aritmética de
+  intervalos podría romper en silencio:
+
+  1. Periodo que **termina exactamente** en `2026-01-01` → un único
+     segmento, vigencia 2025 (semántica `valid_until` exclusiva).
+  2. Periodo que **empieza exactamente** en `2026-01-01` → un único
+     segmento, vigencia 2026 (sin segmento residual de 0 días).
+  3. Periodo que **cruza** el límite → dos segmentos cuya suma de
+     `DP` coincide con la del periodo original (sin error de poste).
+  4. `compute_period_total_cost` con un periodo que cruza el límite
+     produce un total estrictamente entre los dos *single-vigencia*
+     equivalentes (no colapsa a una sola tarifa).
+  5. `compute_hourly_cost_stream` mantiene la monotonía de
+     `cumulative_eur` a través del límite (crítico: un solo *tick*
+     no-monótono lo lee el *recorder* como reset del contador).
+  6. La suma del *stream* horario sobre dos bimestres consecutivos
+     (Nov-Dec 2025 + Jan-Feb 2026) coincide con la suma de los dos
+     `compute_period_total_cost` por bimestre — la invariante en la
+     que se apoya la reconstrucción de la factura.
+
+### Arreglado
+
+- **`ruff format` ahora pasa en CI.** El job *Lint* de `v0.5.12` falló
+  porque dos archivos tocados en aquella release (`store.py` y
+  `tests/test_store_baseline.py`) requerían reformateo. Esta release
+  trae el `ruff format` aplicado a esos dos archivos. No hay cambios
+  funcionales adicionales en el integrador respecto a `v0.5.12`.
+
 ## [0.5.12] — 2026-04-26
 
 ### Arreglado
