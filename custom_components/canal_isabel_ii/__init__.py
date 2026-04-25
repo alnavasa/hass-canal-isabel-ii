@@ -35,6 +35,7 @@ Wizard, in plain words:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -234,6 +235,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # OptionsFlow writes to ``entry.options``; the wizard wrote to
         # ``entry.data``. Options win when both are present.
         "cost": _resolve_cost_settings(entry),
+        # Per-entry asyncio.Lock serializing the read-modify-write
+        # section of the ingest view. Two POSTs hitting the same
+        # entry simultaneously would otherwise both pass the
+        # ``expected_contract == ""`` check, both call
+        # ``async_update_entry`` to claim the contract, and both run
+        # ``store.async_replace`` racing each other's writes. Per-entry
+        # (not global) so two entries can ingest in parallel — only
+        # POSTs targeting the SAME entry serialize.
+        "ingest_lock": asyncio.Lock(),
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

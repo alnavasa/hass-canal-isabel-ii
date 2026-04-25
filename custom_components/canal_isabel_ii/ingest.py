@@ -212,77 +212,99 @@ class CanalIngestView(HomeAssistantView):
         posted_contract = next(iter(contracts_in_csv))
 
         # ------------------------------------------------------------------
-        # Contract-mixing safeguard.
+        # Critical section: contract-mixing safeguard + first-ingest claim
+        # + store write + reload/refresh trigger.
+        #
+        # Every step inside is read-modify-write against shared state
+        # (``config_entry.data``, the on-disk store, the coordinator
+        # cache). Two POSTs hitting the same entry within milliseconds
+        # — easy to do by double-clicking the bookmarklet, or by the
+        # Chrome retry path on a flaky network — would otherwise:
+        #
+        #   * Both observe ``expected_contract == ""`` and both call
+        #     ``async_update_entry`` to claim the contract. The second
+        #     call is a no-op (same contract id) but in a future where
+        #     the user is on a multi-contract account and the bookmarklet
+        #     somehow posts two different contracts back-to-back, the
+        #     second would silently overwrite the first.
+        #   * Both run ``store.async_replace`` and race the JSON write,
+        #     leaving a partially-merged file on disk.
+        #   * Both schedule a config-entry reload, leaving the second
+        #     reload to happen in the middle of the first one's setup.
+        #
+        # The per-entry ``ingest_lock`` (created in __init__.py) makes
+        # the whole block strictly serial PER ENTRY. Different entries
+        # can still ingest in parallel (each has its own lock).
         # ------------------------------------------------------------------
-        config_entry = self.hass.config_entries.async_get_entry(entry_id)
-        if config_entry is None:
-            # Should be impossible — we checked entry_data above — but
-            # belt-and-braces in case the entry was unloaded between
-            # the lookup and now.
-            return _error(request, 404, "unknown_entry", "Entry vanished mid-request.")
+        async with entry_data["ingest_lock"]:
+            config_entry = self.hass.config_entries.async_get_entry(entry_id)
+            if config_entry is None:
+                # Belt-and-braces in case the entry was unloaded
+                # between acquiring the lock and now.
+                return _error(request, 404, "unknown_entry", "Entry vanished mid-request.")
 
-        expected_contract = (config_entry.data.get(CONF_CONTRACT) or "").strip()
-        install_name = config_entry.data.get(CONF_NAME) or "Canal de Isabel II"
+            expected_contract = (config_entry.data.get(CONF_CONTRACT) or "").strip()
+            install_name = config_entry.data.get(CONF_NAME) or "Canal de Isabel II"
 
-        if expected_contract and expected_contract != posted_contract:
-            await _notify_contract_mismatch(
-                self.hass,
-                install_name,
-                expected_contract,
-                posted_contract,
-                entry_id,
-            )
-            return _error(
-                request,
-                409,
-                "contract_mismatch",
-                (
-                    f"This integration entry ('{install_name}') is bound to contract "
-                    f"{expected_contract}, but the CSV is for contract {posted_contract}. "
-                    "If you have more than one contract, add a separate integration "
-                    "entry for the other one."
-                ),
-            )
+            if expected_contract and expected_contract != posted_contract:
+                await _notify_contract_mismatch(
+                    self.hass,
+                    install_name,
+                    expected_contract,
+                    posted_contract,
+                    entry_id,
+                )
+                return _error(
+                    request,
+                    409,
+                    "contract_mismatch",
+                    (
+                        f"This integration entry ('{install_name}') is bound to contract "
+                        f"{expected_contract}, but the CSV is for contract {posted_contract}. "
+                        "If you have more than one contract, add a separate integration "
+                        "entry for the other one."
+                    ),
+                )
 
-        first_ingest = not expected_contract
-        if first_ingest:
-            # First successful POST — claim the contract on the entry.
-            new_data = {**config_entry.data, CONF_CONTRACT: posted_contract}
-            self.hass.config_entries.async_update_entry(config_entry, data=new_data)
-            _LOGGER.info(
-                "[%s] First ingest — entry now bound to contract %s",
-                entry_id,
-                posted_contract,
-            )
+            first_ingest = not expected_contract
+            if first_ingest:
+                # First successful POST — claim the contract on the entry.
+                new_data = {**config_entry.data, CONF_CONTRACT: posted_contract}
+                self.hass.config_entries.async_update_entry(config_entry, data=new_data)
+                _LOGGER.info(
+                    "[%s] First ingest — entry now bound to contract %s",
+                    entry_id,
+                    posted_contract,
+                )
 
-        # ------------------------------------------------------------------
-        # Meter summary — prefer the pre-parsed dict, fall back to HTML scrape.
-        # ------------------------------------------------------------------
-        meter_summary = parse_meter_summary_from_dict(payload.get("meter_summary"))
-        if meter_summary is None:
-            meter_summary = parse_meter_summary_from_html(
-                payload.get("consumption_page_html") or ""
-            )
+            # ------------------------------------------------------------------
+            # Meter summary — prefer the pre-parsed dict, fall back to HTML scrape.
+            # ------------------------------------------------------------------
+            meter_summary = parse_meter_summary_from_dict(payload.get("meter_summary"))
+            if meter_summary is None:
+                meter_summary = parse_meter_summary_from_html(
+                    payload.get("consumption_page_html") or ""
+                )
 
-        # ------------------------------------------------------------------
-        # Store + push.
-        # ------------------------------------------------------------------
-        store = entry_data["store"]
-        coordinator = entry_data["coordinator"]
-        now = datetime.now(UTC)
-        new_count = await store.async_replace(readings, meter_summary, ingest_at=now)
+            # ------------------------------------------------------------------
+            # Store + push.
+            # ------------------------------------------------------------------
+            store = entry_data["store"]
+            coordinator = entry_data["coordinator"]
+            now = datetime.now(UTC)
+            new_count = await store.async_replace(readings, meter_summary, ingest_at=now)
 
-        # The first ever POST creates entities (the wizard finished
-        # without any) — schedule a reload so ``async_setup_entry``
-        # re-runs with data present and materialises the sensors.
-        # Subsequent POSTs only need a coordinator refresh.
-        if first_ingest:
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(entry_id),
-                name="canal_isabel_ii first_ingest reload",
-            )
-        else:
-            await coordinator.async_request_refresh()
+            # The first ever POST creates entities (the wizard finished
+            # without any) — schedule a reload so ``async_setup_entry``
+            # re-runs with data present and materialises the sensors.
+            # Subsequent POSTs only need a coordinator refresh.
+            if first_ingest:
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(entry_id),
+                    name="canal_isabel_ii first_ingest reload",
+                )
+            else:
+                await coordinator.async_request_refresh()
 
         _LOGGER.info(
             "[%s] Ingest OK — contract=%s total=%d new=%d meter=%s first=%s",

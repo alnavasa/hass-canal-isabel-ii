@@ -3,6 +3,35 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.11] — 2026-04-25
+
+### Arreglado
+
+- **POSTs concurrentes contra el mismo *entry* ya no corrompen el
+  estado.** El endpoint `/api/canal_isabel_ii/ingest/<entry_id>`
+  realiza un *read-modify-write* sobre estado compartido:
+  `config_entry.data` (para reclamar el contrato en el primer ingest),
+  el JSON del *store* en disco y la caché del *coordinator*. Si llegan
+  dos POSTs separados por milisegundos contra el mismo *entry* (por
+  doble click del bookmarklet, o el camino de retry de Chrome cuando
+  la red parpadea), los dos pasaban por la misma sección crítica:
+
+  - Los dos veían `expected_contract == ""` y los dos llamaban a
+    `async_update_entry` para reclamar el contrato. Hoy es no-op
+    (mismo id) pero en una cuenta multi-contrato sería una corrupción
+    silenciosa.
+  - Los dos ejecutaban `store.async_replace` y se pisaban en el `write()`
+    del JSON, dejando un fichero parcialmente fusionado.
+  - Los dos programaban un *reload* del *entry*, dejando el segundo
+    reload en mitad del *setup* del primero.
+
+  Solución: cada *entry* lleva su propio `asyncio.Lock` (`ingest_lock`,
+  creado en `__init__.py`). El bloque crítico de `CanalIngestView.post`
+  va envuelto en `async with entry_data["ingest_lock"]:`, así que dos
+  POSTs al mismo *entry* se serializan estrictamente. POSTs a *entries*
+  distintos siguen pudiéndose procesar en paralelo (un *lock* por
+  *entry*, no global).
+
 ## [0.5.10] — 2026-04-25
 
 ### Arreglado
