@@ -3,6 +3,17 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.7] — 2026-04-25
+
+### Cambiado
+
+- **Bump de versión sin cambios funcionales.** Idéntica a `0.5.6` en
+  código. Publicada únicamente para que HACS detecte una versión nueva
+  tras un *clean install* (eliminación de la integración + borrado de
+  estadísticas residuales) y se distinga claramente de cualquier copia
+  cacheada de versiones anteriores. Si vienes de `0.5.6` no necesitas
+  hacer nada: la actualización es no-op.
+
 ## [0.5.6] — 2026-04-25
 
 ### Cambiado
