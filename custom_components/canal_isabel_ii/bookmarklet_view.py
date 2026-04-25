@@ -31,23 +31,34 @@ URL
 
 ::
 
-    GET /api/canal_isabel_ii/bookmarklet/{entry_id}
+    GET /api/canal_isabel_ii/bookmarklet/{entry_id}?t=<token>
 
 Auth
 ----
 
-``requires_auth = True`` — the user reaches this page from a link inside
-the HA UI, so they're already authenticated by HA's session cookie. The
-page itself never executes anything privileged; it's a static HTML
-render of values already stored in ``entry.data``. (The bookmarklet that
-the page exposes still authenticates against the ingest endpoint via its
-own per-entry Bearer token, exactly as before.)
+``requires_auth = False`` + per-entry token validated in the handler with
+``secrets.compare_digest``. We can't use HA's normal ``requires_auth=True``
+because the user reaches this page by **clicking a markdown link in a
+persistent notification**, which causes a plain browser navigation. That
+navigation does NOT carry the ``Authorization: Bearer`` header HA's
+session-cookie auth machinery expects — HA's access token lives in the
+frontend's localStorage and only travels on requests issued by frontend
+JS, not on user-driven URL navigations. With ``requires_auth=True`` the
+view returns 401 Unauthorized to every user who clicks the link.
+
+The ``?t=<token>`` pattern fixes this. The same per-entry token that
+authenticates the ingest endpoint is required as a query param to view
+the install page. Putting it in the URL doesn't widen the attack
+surface: the bookmarklet HTML this page exposes embeds the same token
+verbatim (it's how the bookmarklet authenticates against the ingest
+endpoint when the user clicks it). Anyone who has the page URL also
+has the bookmarklet URL with the token inside — symmetric exposure.
 
 Why this isn't a Lovelace card
 ------------------------------
 
 The notification fires on first config + can be re-fired by the
-``show_bookmarklet`` service. It links to ``/api/canal_isabel_ii/bookmarklet/<entry_id>`` directly — no Lovelace card to install,
+``show_bookmarklet`` service. It links to ``/api/canal_isabel_ii/bookmarklet/<entry_id>?t=<token>`` directly — no Lovelace card to install,
 no add-on, no third-party panel. Just a single HTML page rendered by
 the integration on demand.
 """
@@ -56,6 +67,7 @@ from __future__ import annotations
 
 import html
 import logging
+import secrets
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -81,7 +93,10 @@ class CanalBookmarkletPageView(HomeAssistantView):
 
     url = f"{BOOKMARKLET_PAGE_URL_PREFIX}/{{entry_id}}"
     name = "api:canal_isabel_ii:bookmarklet_page"
-    requires_auth = True  # User clicks from inside HA, cookie auth is fine.
+    # See module docstring "Auth" section: HA's normal requires_auth=True
+    # 401s on plain browser navigations from notification links, so we
+    # validate the per-entry token in the ?t= query param ourselves.
+    requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -108,6 +123,32 @@ class CanalBookmarkletPageView(HomeAssistantView):
         ha_url = config_entry.data.get(CONF_HA_URL) or ""
         token = config_entry.data.get(CONF_TOKEN) or ""
         install = config_entry.data.get(CONF_NAME) or "Canal de Isabel II"
+
+        # Validate the ?t=<token> query param against the entry's stored
+        # Bearer token. We compare in constant time and refuse the
+        # request without leaking which side mismatched.
+        provided_token = request.query.get("t", "")
+        if not token or not provided_token or not secrets.compare_digest(provided_token, token):
+            return web.Response(
+                status=401,
+                text=(
+                    "<!DOCTYPE html><meta charset=utf-8>"
+                    "<title>401 — Canal de Isabel II</title>"
+                    '<body style="font-family:-apple-system,sans-serif;max-width:40rem;'
+                    'margin:3rem auto;padding:0 1rem">'
+                    "<h1>401 · No autorizado</h1>"
+                    "<p>Esta página requiere el token de la integración en el query "
+                    "string (<code>?t=…</code>). Vuelve a la notificación "
+                    '<strong>"Bookmarklet listo"</strong> y pulsa el enlace de '
+                    "instalación desde ahí — el enlace ya incluye el token. Si la "
+                    "perdiste, regenérala desde "
+                    "<em>Herramientas para desarrolladores → Acciones → "
+                    "<code>canal_isabel_ii.show_bookmarklet</code></em>.</p>"
+                    "</body>"
+                ),
+                content_type="text/html",
+                charset="utf-8",
+            )
 
         primary_bm = build_bookmarklet(
             ha_url=ha_url,

@@ -262,13 +262,31 @@ def collect_alternate_urls(hass: HomeAssistant, primary_url: str) -> list[tuple[
     return out
 
 
-def bookmarklet_page_url(entry_id: str) -> str:
+def bookmarklet_page_url(entry_id: str, token: str) -> str:
     """Return the relative URL to the per-entry bookmarklet install page.
 
     The page is served by the integration's
     :class:`CanalBookmarkletPageView` and carries the drag-to-bookmark
-    link + the copy-to-clipboard button."""
-    return f"{BOOKMARKLET_PAGE_URL_PREFIX}/{entry_id}"
+    link + the copy-to-clipboard button.
+
+    The ``token`` is appended as a ``?t=`` query param. The view runs
+    with ``requires_auth=False`` and validates the token in
+    constant-time (`secrets.compare_digest`) against the entry's stored
+    Bearer token. We need this auth path because a plain browser
+    navigation from a notification link (which is what the user
+    actually does) does NOT carry the ``Authorization: Bearer`` header
+    that HA's normal `requires_auth=True` machinery expects — the
+    Bearer token lives in HA's frontend localStorage and only travels
+    on requests issued by frontend JS, not on user-driven URL
+    navigations. Without the ``?t=…`` shortcut the page returns 401.
+
+    Putting the token in the query string doesn't widen the attack
+    surface: the same token is already baked verbatim into the
+    bookmarklet body the page exposes, and into every install copy the
+    user makes. Anyone who has the page URL also has the bookmarklet
+    URL — symmetric exposure.
+    """
+    return f"{BOOKMARKLET_PAGE_URL_PREFIX}/{entry_id}?t={quote(token, safe='')}"
 
 
 def format_install_notification(
@@ -302,7 +320,7 @@ def format_install_notification(
     bullets, the bold install button, and the collapsible block
     correctly.
     """
-    page_url = bookmarklet_page_url(entry_id)
+    page_url = bookmarklet_page_url(entry_id, token)
     alternates_hint = ""
     if alternates:
         labels = ", ".join(label for label, _url, _bm in alternates)

@@ -65,8 +65,12 @@ INGEST_URL_PREFIX = "/api/canal_isabel_ii/ingest"
 
 #: URL prefix for the human-facing bookmarklet install page (HTML with a
 #: drag-to-bookmarks-bar link + a "copy to clipboard" button). Authenticated
-#: with HA's normal session cookie; the user reaches it from a link in the
-#: install notification.
+#: by the per-entry token in a ``?t=<token>`` query param (``requires_auth=False``
+#: on the view), because a plain browser navigation from a markdown link in a
+#: persistent notification does NOT carry the ``Authorization: Bearer`` header
+#: that HA's session-cookie auth requires. Putting the same token in the URL
+#: doesn't widen the attack surface — the bookmarklet body that this page
+#: exposes already embeds the same token in plain JS.
 BOOKMARKLET_PAGE_URL_PREFIX = "/api/canal_isabel_ii/bookmarklet"
 
 #: Maximum POST body size accepted by the ingest endpoint. The

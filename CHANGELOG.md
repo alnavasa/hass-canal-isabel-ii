@@ -3,6 +3,38 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.4.9] — 2026-04-25
+
+### Arreglado
+
+- **Página de instalación devolvía 401 Unauthorized**. El `HomeAssistantView`
+  de v0.4.8 se registró con `requires_auth=True` esperando que la cookie de
+  sesión de HA bastase, pero **una navegación normal del navegador desde un
+  link markdown de notificación no lleva el header `Authorization: Bearer`**
+  que HA exige (el access token vive en `localStorage` del frontend y solo
+  viaja en peticiones que emite el JS del frontend, no en navegaciones
+  directas del usuario). Resultado: cada user que clicaba el link veía
+  *"401: Unauthorized"* en blanco. Ahora la vista corre con
+  `requires_auth=False` y valida el token de la entry vía `?t=<token>` en el
+  query string, comparado con `secrets.compare_digest`. La notificación
+  reescribe el link incluyendo el token automáticamente — abrir la
+  notificación → click → página carga.
+
+### Notas
+
+- **No expone nada nuevo**: el mismo token ya viaja embebido en el cuerpo
+  del bookmarklet (es lo que el `<a href="javascript:…">` usa para POSTear
+  al endpoint de ingesta). Quien tiene la URL de la página tiene también la
+  URL del bookmarklet con el token dentro — exposición simétrica, no se
+  añade superficie.
+- **Acordaos de regenerar la notificación tras update**: la URL antigua
+  `/api/canal_isabel_ii/bookmarklet/<entry_id>` (sin `?t=…`) seguirá dando
+  401. *Ajustes → Herramientas para desarrolladores → Acciones →
+  `canal_isabel_ii.show_bookmarklet`* para reaparecer la notificación con
+  el link nuevo. El bookmarklet en sí (el favorito en tu barra) **no
+  cambia** — solo cambia el link a la página de instalación dentro de la
+  notificación.
+
 ## [0.4.8] — 2026-04-25
 
 ### Añadido

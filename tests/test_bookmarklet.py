@@ -308,6 +308,27 @@ class TestFormatInstallNotification:
         )
         assert f"/api/canal_isabel_ii/bookmarklet/{ENTRY}" in msg
 
+    def test_install_page_link_carries_token(self):
+        # The page view runs with requires_auth=False and validates the
+        # ?t= query param against the entry's stored Bearer token. If
+        # the notification link doesn't carry the token, every user
+        # who clicks it gets 401. Pin that the token is in there.
+        bm = build_bookmarklet(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        src = build_bookmarklet_source(
+            ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
+        )
+        msg = format_install_notification(
+            install=INSTALL,
+            bookmarklet=bm,
+            ha_url=HA_URL,
+            entry_id=ENTRY,
+            token=TOKEN,
+            source=src,
+        )
+        assert f"/api/canal_isabel_ii/bookmarklet/{ENTRY}?t={TOKEN}" in msg
+
     def test_mentions_contract_segregation_warning(self):
         bm = build_bookmarklet(
             ha_url=HA_URL, entry_id=ENTRY, token=TOKEN, installation_name=INSTALL
