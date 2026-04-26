@@ -3,6 +3,66 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.20] — 2026-04-26
+
+### Documentación — FAQ + ampliación de limitaciones conocidas
+
+Solo cambios de docs en `docs/USE.md`. Cero código tocado, cero
+migración, cero impacto en runtime.
+
+#### Añadido
+
+- **Sección `## 10. FAQ`** con 12 preguntas/respuestas agrupadas en
+  cuatro bloques (cálculo de coste, sensores, troubleshooting,
+  operaciones / migración). Cubre dudas que han ido apareciendo en uso
+  real:
+
+  - **Cálculo de coste**: precisión vs factura real (<1 % en condiciones
+    normales), si el coste lleva IVA, por qué el primer bimestre tras
+    instalar suele subestimar, cómo se comporta cuando el ciclo de
+    facturación está desfasado del bimestre natural, qué pasa cuando
+    Canal sube tarifa a mitad de periodo.
+  - **Sensores**: por qué `Bloque tarifario actual` puede no coincidir
+    con la factura (usa bimestre natural), qué hacer si te cambian el
+    contador físico (servicio `reset_meter`).
+  - **Troubleshooting**: barras negativas en el panel Energía → Agua
+    (servicio `clear_cost_stats`), bookmarklet devuelve 401 (token
+    rotado / entry recreada / favorito corrupto), invalidar el
+    bookmarklet sin borrar la integración (rotación de token v0.5.18+).
+  - **Operaciones**: qué se preserva al actualizar via HACS, qué se
+    pierde al eliminar y reinstalar la entry y cómo evitar dejar
+    estadísticas huérfanas en el recorder.
+
+  Anchors clicables (`#faq-bloque`, `#faq-primer-bimestre`,
+  `#faq-negativo`) para enlazar desde otras partes de la doc.
+
+#### Cambiado
+
+- **`## 9. Limitaciones conocidas` ampliada** con dos puntos nuevos
+  (con link al FAQ para detalle completo):
+
+  - El sensor `Bloque tarifario actual` agrupa por **bimestre natural
+    calendario**, no por el ciclo real de facturación. Si el ciclo del
+    contrato está desfasado, el bloque mostrado puede no coincidir con
+    el de la factura — el total anual sí cuadra.
+  - El `Coste acumulado` puede subestimar el primer bimestre tras
+    instalar la integración por falta de cobertura de las lecturas
+    previas a la primera pulsación del bookmarklet. Cuotas fijas se
+    contabilizan vía catch-up automático; la parte variable solo cubre
+    lo que el cache local tenga. A partir del segundo bimestre completo
+    desaparece el desvío.
+
+#### Por qué
+
+Hasta ahora la única documentación visible al usuario sobre estos
+casos vivía en sitios dispersos: la descripción del servicio
+`clear_cost_stats` en `services.yaml` (visible solo al expandir el
+servicio en *Dev Tools → Acciones*), comentarios en `tariff.py` y
+`__init__.py` (no visibles desde HA), y entradas puntuales en el
+CHANGELOG (que pocos usuarios leen). Centralizar en `USE.md` reduce
+fricción para usuarios que se topan con el comportamiento esperado
+pero no documentado y abren issues que ya tienen respuesta.
+
 ## [0.5.19] — 2026-04-26
 
 ### Añadido — Cierre de gaps en cobertura de tests

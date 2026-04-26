@@ -449,7 +449,186 @@ Deberías ver al menos un `('canal_isabel_ii:consumption_<id>', 'Casa - Canal de
 - **Lectura absoluta diaria**: el sensor `Lectura del contador` se
   refresca **una vez al día** porque así lo expone el portal. No
   esperes verlo subir minuto a minuto.
+- **`Bloque tarifario actual` usa bimestres naturales calendario**
+  (ene-feb, mar-abr…), no tu ciclo real de facturación. Si Canal te
+  factura desfasado (típico: del día 6 al 14 del mes equivalente dos
+  meses después), el bloque mostrado puede no coincidir exactamente
+  con el de la factura. El total anual sigue siendo correcto. Detalle
+  en [FAQ → ¿Por qué el bloque tarifario actual no coincide con mi
+  factura?](#faq-bloque).
+- **`Coste acumulado` puede subestimar el primer bimestre tras
+  instalar la integración**, porque le faltan las lecturas de las
+  horas previas a la primera pulsación del bookmarklet. Cuotas fijas
+  sí se contabilizan (catch-up automático), variable no. A partir
+  del segundo bimestre completo la diferencia desaparece. Detalle en
+  [FAQ → ¿Por qué el coste de mi primer bimestre es menor que la
+  factura?](#faq-primer-bimestre).
 - **Tarifa real**: la integración no incluye tarifa por defecto porque
   Canal cambia precios anualmente y la fórmula bimestral por bloques
   no es expresable en una sola constante. Modela tú la tarifa con
   `template:` (ver §5).
+
+## 10. FAQ
+
+Preguntas que aparecen recurrentemente. Si no encuentras la tuya, abre
+un issue.
+
+### Sobre el cálculo de coste
+
+#### ¿Cuán preciso es el `Coste acumulado` respecto a mi factura real?
+
+El motor está calibrado para quedar **por debajo del 10 % de
+desviación** vs factura real. En la práctica, con cobertura completa
+de lecturas en el bimestre (es decir, primera pulsación del
+bookmarklet anterior al inicio del periodo de facturación), la
+desviación medida en facturas reales se mantiene **bajo el 1 %**.
+
+Ese ±1 % residual lo explican fundamentalmente dos efectos: (a) el
+modelo prorratea el cambio de vigencia (p.ej. 2025→2026) por días
+mientras que la factura suele aplicar una sola vigencia, y (b) la
+factura puede traer conceptos extras del Ayuntamiento (basuras, tasas
+locales) que el modelo no incorpora.
+
+#### ¿Lleva IVA incluido?
+
+Sí. Por defecto se aplica **10 %** sobre la base imponible (consumo +
+cuota fija + suplementaria de alcantarillado). El porcentaje es
+configurable desde *Configurar → Editar parámetros de coste* — útil
+si en algún momento cambia el tipo de IVA del agua.
+
+<a id="faq-primer-bimestre"></a>
+
+#### ¿Por qué el coste de mi primer bimestre es menor que la factura?
+
+Cuando instalas la integración a mitad de bimestre, los m³ consumidos
+**antes** de tu primera pulsación del bookmarklet no entran en el
+modelo: el portal de Canal solo te devuelve histórico hasta donde
+tenga datos disponibles en ese momento. La cuota fija de servicio
+**sí** se contabiliza para todo el bimestre (catch-up automático),
+pero la parte variable (€/m³ por bloque) solo cubre lo que el cache
+local tenga.
+
+A partir del **segundo bimestre completo** capturado desde el día 1,
+la diferencia desaparece y verás <1 % de desviación.
+
+Truco para acortarlo: en tu primera pulsación, filtra en pantalla
+desde el inicio del bimestre actual y captura por tramos de ≤30 días
+(ver §2 *Histórico el día 1*).
+
+#### ¿Funciona si mi ciclo de facturación está desfasado del bimestre natural?
+
+Sí. El motor reparte el consumo por bimestre natural (ene-feb,
+mar-abr…) y aplica la vigencia de tarifa que corresponda a cada
+día. Para un periodo de factura desfasado (típico: 6/11 a 14/1, p.ej.)
+los m³ totales y el coste anual cuadran; lo que puede no cuadrar al
+céntimo son los totales bimestre-a-bimestre cuando un periodo cruza
+una frontera de vigencia (cambio de año).
+
+#### ¿Qué pasa cuando Canal sube la tarifa a mitad de periodo?
+
+El código separa vigencias (`_TARIFA_2025`, `_TARIFA_2026`…) en
+`tariff.py` y hace **split por días**: cada día factura a la vigencia
+en vigor. Cuando Canal publica una nueva vigencia, se añade al
+módulo y la versión nueva de la integración la incorpora — espera
+una release ese año.
+
+### Sobre los sensores
+
+<a id="faq-bloque"></a>
+
+#### ¿Por qué el `Bloque tarifario actual` a veces no coincide con mi factura?
+
+El sensor agrupa el consumo por **bimestre natural calendario** (1
+de mes impar al 1 del mes impar siguiente), no por tu ciclo real
+de facturación. Si Canal te factura desfasado, el bloque que ves en
+HA puede no coincidir exactamente con el que figura en la factura.
+El **total anual** sigue siendo correcto, porque al final del año
+acabas consumiendo los mismos m³ independientemente de dónde caigan
+los cortes bimestrales.
+
+Si tu factura va del 6/11 al 14/1, por ejemplo, el sensor reparte
+ese consumo entre bimestre nov-dic y bimestre ene-feb naturales, y
+el bloque actual lo computa contra el bimestre natural que esté en
+curso ahora.
+
+#### ¿Qué hago si me cambian el contador físico?
+
+Llama al servicio **`canal_isabel_ii.reset_meter`** (disponible
+desde v0.5.16) desde *Dev Tools → Acciones*. Resetea el baseline
+del contador para que la integración aprenda la nueva lectura
+absoluta sin que el sensor `Consumo periodo` interprete la bajada
+de m³ como un consumo negativo.
+
+### Troubleshooting
+
+<a id="faq-negativo"></a>
+
+#### El panel Energía → Agua muestra una barra negativa en `Coste agua`
+
+Causa típica: tras una actualización de la integración (o un trim
+del cache local), el `cum_eur` recalculado en la sesión actual es
+**menor** que el snapshot que el recorder guardó en una sesión
+anterior. El panel hace `final − inicio` para el rango visible y
+sale negativo.
+
+Solución: ejecuta el servicio
+**`canal_isabel_ii.clear_cost_stats`** (disponible desde v0.5.15)
+desde *Dev Tools → Acciones*. Borra las stats antiguas y la
+integración republica la serie monótona desde cero en el siguiente
+tick del coordinator (≤ 1 min). Refresca el navegador y la barra
+negativa desaparece.
+
+Caveat: el histórico de coste anterior al clear se pierde (las
+nuevas stats arrancan en 0 €). Las nuevas barras a partir de hoy
+serán correctas.
+
+#### El bookmarklet devuelve 401 al pulsarlo
+
+Tres causas posibles, por orden:
+
+1. **Token rotado**. Si rotaste el token desde *Configurar →
+   Rotar token* (v0.5.18+), el bookmarklet viejo deja de funcionar
+   inmediatamente. Re-arrastra el bookmarklet nuevo desde la
+   notificación persistente (o llama al servicio
+   `canal_isabel_ii.show_bookmarklet` para regenerarla).
+2. **Entry recreada**. Si borraste y volviste a añadir la
+   integración, el `entry_id` es nuevo y el bookmarklet apunta a un
+   endpoint inexistente. Mismo fix: re-arrastra el bookmarklet
+   actual.
+3. **El bookmarklet en sí está corrupto**. Algunos navegadores
+   recortan URLs muy largas al arrastrarlas. Vuelve a copiar el
+   `javascript:…` de la notificación a mano y pégalo en
+   "Editar" sobre el favorito.
+
+#### Quiero invalidar el bookmarklet sin borrar la integración
+
+*Configurar → Rotar token* (disponible desde v0.5.18). Genera un
+token nuevo de 192 bits, invalida el anterior atómicamente, y
+republica la notificación con el bookmarklet actualizado. La caché
+de lecturas, el baseline y las estadísticas externas se preservan.
+
+### Operaciones / migración
+
+#### ¿Pierdo datos si actualizo la integración via HACS?
+
+No. El cache de lecturas, el baseline del contador y las
+estadísticas externas (`canal_isabel_ii:consumption_<id>`,
+`canal_isabel_ii:cost_<id>`) sobreviven. Cuando hay migración de
+schema (one-shot tras un cambio de formato), se anuncia
+explícitamente en el CHANGELOG.
+
+#### ¿Pierdo datos si elimino y vuelvo a instalar la integración?
+
+Sí, parcialmente. Al eliminar la entry se borran:
+
+- Cache local de lecturas (`.storage/canal_isabel_ii.<entry_id>`).
+- Baseline del contador.
+- Token del bookmarklet (el siguiente tendrá un valor distinto).
+
+Lo que **sobrevive** son las estadísticas externas en el recorder
+(`canal_isabel_ii:consumption_<contract>` y
+`canal_isabel_ii:cost_<contract>`), que quedan **huérfanas** sin
+nadie que las refresque. Si vas a reinstalar, conviene ejecutar
+**`clear_cost_stats`** *antes* de eliminar la entry para no dejar
+basura en el recorder, y luego reconstruirlas desde cero tras
+reinstalar.
