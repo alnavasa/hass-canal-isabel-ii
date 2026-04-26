@@ -27,7 +27,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfVolume
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -368,6 +368,7 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         )
         self._handle_coordinator_update()
 
+    @callback
     def _on_meter_reset(self) -> None:
         """Drop the monotonic-guard memory; force a state recompute.
 
@@ -375,6 +376,15 @@ class CanalCumulativeConsumptionSensor(_ContractSensor, RestoreSensor):
         ``native_value`` will accept whatever the cache + (now-empty)
         baseline produces, even if it is lower than what we last
         published — that is the point of the service.
+
+        Marked ``@callback`` so HA's dispatcher invokes it directly on
+        the event loop instead of scheduling it on the executor. Without
+        the decorator HA 2026.x raises ``RuntimeError`` from
+        :meth:`async_write_ha_state` ("called from a thread other than
+        the event loop"); the assignment to ``_restored_value`` runs
+        first so the recovery still happens, but the log fills with
+        tracebacks and future-HA may upgrade the warning into a hard
+        crash.
         """
         _LOGGER.info(
             "[%s] Cumulative consumption: meter reset signal received "
@@ -683,8 +693,14 @@ class CanalMeterReadingSensor(_ContractSensor, RestoreSensor):
             )
         )
 
+    @callback
     def _on_meter_reset(self) -> None:
-        """Clear the monotonic guard so the next reading is accepted."""
+        """Clear the monotonic guard so the next reading is accepted.
+
+        ``@callback`` keeps HA's dispatcher on the event loop — see
+        :meth:`CanalCumulativeConsumptionSensor._on_meter_reset` for
+        the full thread-safety rationale.
+        """
         _LOGGER.info(
             "[%s] Meter reading: meter reset signal received "
             "(was %.3f m³); clearing monotonic guard",
@@ -883,8 +899,14 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         )
         self._handle_coordinator_update()
 
+    @callback
     def _on_meter_reset(self) -> None:
-        """Clear the cumulative-cost monotonic guard."""
+        """Clear the cumulative-cost monotonic guard.
+
+        ``@callback`` keeps HA's dispatcher on the event loop — see
+        :meth:`CanalCumulativeConsumptionSensor._on_meter_reset` for
+        the full thread-safety rationale.
+        """
         _LOGGER.info(
             "[%s] Cumulative cost: meter reset signal received "
             "(was %.2f); clearing monotonic guard",
@@ -894,6 +916,7 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         self._restored_value = None
         self.async_write_ha_state()
 
+    @callback
     def _on_clear_cost_stats(self) -> None:
         """Clear the cumulative-cost monotonic guard after a stats wipe.
 
@@ -905,6 +928,10 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         wipe means the user is recovering from a recorder corruption
         and the meter is unchanged. Logged separately so operators
         can tell which event drove the reset when reading the log.
+
+        ``@callback`` keeps HA's dispatcher on the event loop — see
+        :meth:`CanalCumulativeConsumptionSensor._on_meter_reset` for
+        the full thread-safety rationale (v0.5.23+).
         """
         _LOGGER.info(
             "[%s] Cumulative cost: clear_cost_stats signal received "

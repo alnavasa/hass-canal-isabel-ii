@@ -3,6 +3,86 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.23] — 2026-04-26
+
+### Arreglado — `RuntimeError` en handlers del dispatcher (HA 2026.x)
+
+Tras desplegar v0.5.22 en MF1 la recuperación funcionó end-to-end
+(panel Energía → Agua → marzo recuperó 15,13 €, ya no 0 €), pero
+el log de HA se llenó de tracebacks por cada invocación de
+`clear_cost_stats`:
+
+```
+ERROR (SyncWorker_2) Exception in _on_clear_cost_stats:
+RuntimeError: Detected that custom integration 'canal_isabel_ii'
+  calls async_write_ha_state from a thread other than the event
+  loop ... at custom_components/canal_isabel_ii/sensor.py, line 917
+```
+
+#### Causa raíz
+
+Los cuatro handlers del dispatcher (`_on_meter_reset` × 3 sensores
++ `_on_clear_cost_stats` en el sensor de coste) son métodos
+síncronos. Sin el decorador `@callback`, HA programa su ejecución
+en el thread pool del executor (`SyncWorker_*`), y la llamada
+posterior a `async_write_ha_state()` dispara el guard de
+thread-safety (`report_non_thread_safe_operation`) que en HA 2026.x
+**lanza `RuntimeError`** en lugar de loggear un warning.
+
+Dos cosas evitaron que esto rompiera la recuperación en producción:
+
+1. La mutación de estado (`self._restored_value = None`) ocurre
+   *antes* de la llamada a `async_write_ha_state()`, así que el
+   próximo tick del coordinator vio el guard limpio y empujó.
+2. `recorder.async_clear_statistics` ya había corrido en el
+   handler del servicio principal, así que la recuperación venía
+   conducida por *esa* ruta aunque el handler crashease.
+
+Pero los tracebacks son reales: una versión futura de HA puede
+elevar el warning a abort duro que corra antes de la asignación, o
+bloquear el dispatcher entero. Y en los tres `_on_meter_reset`
+(ninguno se había disparado en el campo porque nadie había
+invocado `reset_meter` en MF1) el mismo bug latente saltaría en
+cuanto un usuario reemplazase un contador físico.
+
+#### Cambiado
+
+- **`sensor.py`**: importa `callback` desde `homeassistant.core`.
+- **`sensor.py`**: añade `@callback` a los 4 handlers del
+  dispatcher:
+  - `CanalCumulativeConsumptionSensor._on_meter_reset`
+  - `CanalMeterReadingSensor._on_meter_reset`
+  - `CanalCumulativeCostSensor._on_meter_reset`
+  - `CanalCumulativeCostSensor._on_clear_cost_stats`
+
+  El primero lleva el docstring extendido que explica la razón
+  (thread-safety en HA 2026.x); los otros tres apuntan a él.
+
+#### Tests
+
+2 tests nuevos en `tests/test_dispatcher_handler_decorators.py`
+(introspección AST pura, sin runtime de HA, mismo patrón que
+`test_clear_cost_stats_dispatch.py` y `test_services_yaml.py`):
+
+- `test_callback_imported_from_homeassistant_core`
+- `test_every_dispatcher_handler_is_marked_callback` — recorre el
+  AST de `sensor.py`, encuentra los métodos cuyo nombre coincide
+  con `_on_meter_reset` o `_on_clear_cost_stats` dentro de
+  cualquier `class`, y exige que cada uno carry `@callback`. Si
+  un futuro contributor añade un nuevo handler siguiendo la
+  convención `_on_*` y olvida el decorador, este test falla
+  *antes* de que el usuario vea tracebacks.
+
+Total: **243 tests** (era 241 en v0.5.22). Verificado: con
+`git stash` de los cambios y reejecutando, los 2 tests nuevos
+fallan — el guard captura el bug exacto que v0.5.23 arregla.
+
+#### Recuperación tras actualizar
+
+Sin pasos manuales. Tras update a v0.5.23, la próxima invocación
+de `clear_cost_stats` (o `reset_meter`) corre el handler en el
+event loop limpiamente — sin tracebacks en el log.
+
 ## [0.5.22] — 2026-04-26
 
 ### Arreglado — `clear_cost_stats` dejaba la entidad de coste congelada
