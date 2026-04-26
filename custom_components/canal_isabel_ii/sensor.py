@@ -59,6 +59,7 @@ from .models import MeterSummary, Reading
 from .statistics_helpers import (
     continuation_stats,
     cumulative_to_deltas,
+    is_cost_stream_regression,
     merge_forward_and_backfill,
     needs_backfill,
 )
@@ -918,10 +919,14 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         if not stream:
             return self._restored_value
         latest = stream[-1].cumulative_eur
-        if self._restored_value is not None and latest < self._restored_value - 0.01:
+        if is_cost_stream_regression(latest, self._restored_value):
             # Same rationale as the consumption sensor: a cache wipe
             # would otherwise look like a meter reset to
-            # TOTAL_INCREASING.
+            # TOTAL_INCREASING. The same predicate is checked in
+            # ``_push_cost_statistics_locked`` (v0.5.21+) so the
+            # recorder never sees a regressed sum behind the entity
+            # state's back — that mismatch was the source of the
+            # negative-bar regression that survived ``clear_cost_stats``.
             _LOGGER.warning(
                 "Cumulative cost dropped (%.2f → %.2f); keeping previous value",
                 self._restored_value,
@@ -998,6 +1003,33 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
     async def _push_cost_statistics_locked(self) -> None:
         stream = self._cost_stream()
         if not stream:
+            return
+
+        # v0.5.21 guard: if the stream's latest cumulative_eur has
+        # regressed below the entity's last-known-good value (because
+        # the cache lost an old bimonth, cost params changed, or any
+        # other recompute drift), DO NOT push. The entity state
+        # already holds the previous (higher) value via the same
+        # predicate in ``native_value``; pushing the smaller series
+        # would create a seam in the recorder where ``sum[n] <
+        # sum[n-1]`` and the Energy panel renders that seam as a
+        # large negative bar (~ -38 € for MF1 in v0.5.20). Keeping
+        # both writers (entity state + push) in lockstep on this
+        # predicate eliminates the divergence by construction; the
+        # next coordinator tick will retry, and once the stream
+        # catches back up to ``_restored_value`` the push resumes.
+        latest = stream[-1].cumulative_eur
+        if is_cost_stream_regression(latest, self._restored_value):
+            _LOGGER.warning(
+                "[%s] Cost stream regressed (%.2f < %.2f); "
+                "skipping recorder push to preserve monotonicity. "
+                "Existing long-term statistics retain the previous "
+                "(higher) value; the push resumes once the stream "
+                "catches back up.",
+                self._contract_id,
+                latest,
+                self._restored_value,
+            )
             return
 
         currency = self._attr_native_unit_of_measurement or "EUR"

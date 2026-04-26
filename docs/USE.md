@@ -565,22 +565,31 @@ de m³ como un consumo negativo.
 
 #### El panel Energía → Agua muestra una barra negativa en `Coste agua`
 
-Causa típica: tras una actualización de la integración (o un trim
-del cache local), el `cum_eur` recalculado en la sesión actual es
-**menor** que el snapshot que el recorder guardó en una sesión
-anterior. El panel hace `final − inicio` para el rango visible y
-sale negativo.
+A partir de **v0.5.21** este caso queda cerrado por construcción:
+la integración aplica el mismo guard antirregresión en el estado
+de la entidad y en el push al recorder, así que ambos caminos
+saltan en lockstep cuando el `cum_eur` recién calculado cae por
+debajo del último valor estable. Resultado: nunca más se escribe
+una serie con `sum[n] < sum[n-1]`, que es lo que el panel pinta
+como barra negativa.
 
-Solución: ejecuta el servicio
-**`canal_isabel_ii.clear_cost_stats`** (disponible desde v0.5.15)
-desde *Dev Tools → Acciones*. Borra las stats antiguas y la
-integración republica la serie monótona desde cero en el siguiente
-tick del coordinator (≤ 1 min). Refresca el navegador y la barra
-negativa desaparece.
+Si vienes de v0.5.20 o anterior y ya tienes barras negativas
+**heredadas** en el recorder (corruption persistente, sobrevive a
+reinicios), ejecuta **una vez** el servicio
+**`canal_isabel_ii.clear_cost_stats`** desde *Dev Tools →
+Acciones*. Borra las stats antiguas y la integración republica la
+serie monótona desde cero en el siguiente tick del coordinator
+(≤ 1 min). Refresca el navegador y la barra negativa desaparece.
 
-Caveat: el histórico de coste anterior al clear se pierde (las
-nuevas stats arrancan en 0 €). Las nuevas barras a partir de hoy
-serán correctas.
+A partir de ese momento ya no necesitas volver a llamarlo: con
+v0.5.21 instalada, los reinicios de HA, los trims de cache, los
+cambios de parámetros tarifarios y las recomputaciones por
+fronteras de vigencia dejan de producir barras negativas sin
+intervención manual.
+
+Caveat del clear: el histórico de coste anterior al clear se
+pierde (las nuevas stats arrancan en 0 €). Las nuevas barras a
+partir de ese momento serán correctas.
 
 #### El bookmarklet devuelve 401 al pulsarlo
 

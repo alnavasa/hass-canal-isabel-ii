@@ -3,6 +3,99 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.21] — 2026-04-26
+
+### Arreglado — barras negativas recurrentes en el panel Energía
+
+El bug de las barras negativas (~38 € de drop en MF1) que persistía
+incluso después de ejecutar `clear_cost_stats` queda cerrado por
+construcción. Si lo estabas viendo: actualiza, ejecuta una vez
+`canal_isabel_ii.clear_cost_stats` para limpiar las barras existentes,
+y no debería volver.
+
+#### Causa raíz
+
+`CanalCumulativeCostSensor.native_value` tenía un guard de monotonicidad
+desde v0.5.x: si el stream calculado por `compute_hourly_cost_stream`
+producía un cum_eur menor que el último valor guardado en disco
+(p.ej. cache perdió una bimensualidad antigua, recompute con params
+distintos, etc.), el entity state se quedaba en el valor anterior
+(correcto). Pero `_push_cost_statistics_locked` **no tenía el mismo
+guard**: empujaba la serie nueva (más baja) al recorder sin condición.
+
+Resultado: el entity state mostraba 150,54 € (guardado), pero el
+recorder recibía una serie terminando en 111,84 €. La Energy panel
+calcula cada barra como `sum[n] - sum[n-1]`, así que el seam entre el
+valor antiguo (150,54) y el nuevo (111,84) renderizaba como una
+barra de **−38,70 €**. La asimetría entre los dos paths era el
+mecanismo: el guard estaba a medias.
+
+Disparador típico: arranque de HA. `RestoreSensor` recupera el último
+valor persistido (el alto). El primer tick del coordinator recomputa
+el stream y el push escribe el valor menor. La barra negativa aparece
+"al cabo del rato", no al boot — exactamente el patrón que tú
+describiste.
+
+#### Cambiado
+
+- **`statistics_helpers.py`**: nuevo helper puro `is_cost_stream_regression(latest, restored, threshold=0.01)`
+  que centraliza la detección de regresión. Devuelve `True` si
+  `restored is not None and latest < restored - threshold`.
+- **`sensor.py` — `CanalCumulativeCostSensor.native_value`**: refactor
+  para usar el helper en vez de la condición inline (DRY, mismo
+  comportamiento exacto).
+- **`sensor.py` — `_push_cost_statistics_locked`**: nueva guard al
+  inicio que llama al mismo helper. Si el stream regresionó, **el
+  push se aborta** y el recorder retiene los valores antiguos
+  (correctos). El warning del log identifica el contract afectado y
+  los dos valores en juego para diagnóstico operativo.
+
+Ambos paths ahora ejecutan el mismo predicado → no pueden divergir →
+la barra negativa no se puede crear de nuevo.
+
+#### Recuperación tras actualizar
+
+Las barras negativas que estén ya en el recorder se quedan ahí hasta
+que las limpies manualmente:
+
+1. Actualiza a v0.5.21 vía HACS.
+2. *Dev Tools → Acciones* → `canal_isabel_ii.clear_cost_stats` →
+   *Llamar al servicio*.
+3. La siguiente actualización del coordinator empuja una serie limpia
+   (vía cold-start). El panel Energía se rehidrata correctamente en
+   minutos.
+
+A partir de aquí el guard impide nuevas barras negativas — el push
+queda alineado con el entity state en todo momento.
+
+#### Tests
+
+7 tests nuevos en `tests/test_continuation_stats.py` que pinan el
+contrato del helper:
+
+- `restored=None` → False (cold-start, push procede).
+- `latest == restored` → False (idempotente).
+- `latest` ligeramente por debajo (dentro de threshold) → False
+  (absorbe ruido de coma flotante).
+- `latest` significativamente por debajo (caso MF1: 111,84 vs 150,54) → True.
+- `threshold` configurable (más estricto / más laxo).
+- `latest > restored` (caso normal) → False.
+- `restored=0.0` (primer bimestre fresh) → False salvo `latest < 0`
+  (que `compute_hourly_cost_stream` nunca produce, pero pinamos el
+  contrato del helper).
+
+#### Por qué no quito también el push entity-side
+
+Lo había propuesto inicialmente para eliminar la carrera entre nuestro
+push y la auto-generación de stats por HA (`state_class=TOTAL`). Tras
+re-pensarlo: con el guard del push, **ambos escritores son
+deterministas y convergentes** — escribimos `latest_cum_eur` solo
+cuando no hay regresión, y HA escribe el entity state que también está
+guardado por el mismo predicado. Mismo valor por construcción, sin
+divergencia. Quitar el entity-side push hubiera roto compatibilidad
+con setups que apuntaban Energy panel a la entidad. No vale la pena
+para v0.5.21.
+
 ## [0.5.20] — 2026-04-26
 
 ### Documentación — FAQ + ampliación de limitaciones conocidas
