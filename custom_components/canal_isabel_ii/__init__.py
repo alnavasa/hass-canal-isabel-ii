@@ -478,9 +478,7 @@ async def _clear_cost_stats_for_entry(
     for contract in contracts:
         async_dispatcher_send(
             hass,
-            SIGNAL_CLEAR_COST_STATS.format(
-                entry_id=entry.entry_id, contract_id=contract
-            ),
+            SIGNAL_CLEAR_COST_STATS.format(entry_id=entry.entry_id, contract_id=contract),
         )
 
 

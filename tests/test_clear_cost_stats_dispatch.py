@@ -224,14 +224,10 @@ def test_signal_send_and_connect_share_identifier():
     # the import side and still ship dead code. Counting Name nodes
     # specifically requires actual *use* of the identifier.
     init_uses = sum(
-        1
-        for n in ast.walk(init_tree)
-        if isinstance(n, ast.Name) and n.id == _SIGNAL_NAME
+        1 for n in ast.walk(init_tree) if isinstance(n, ast.Name) and n.id == _SIGNAL_NAME
     )
     sensor_uses = sum(
-        1
-        for n in ast.walk(sensor_tree)
-        if isinstance(n, ast.Name) and n.id == _SIGNAL_NAME
+        1 for n in ast.walk(sensor_tree) if isinstance(n, ast.Name) and n.id == _SIGNAL_NAME
     )
     assert init_uses >= 1, (
         f"__init__.py imports {_SIGNAL_NAME} but never uses it as a "
