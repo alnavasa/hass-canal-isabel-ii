@@ -3,6 +3,137 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.19] — 2026-04-26
+
+### Añadido — Cierre de gaps en cobertura de tests
+
+Tres ficheros de tests nuevos (33 tests) que cubren código que hasta
+ahora solo se ejercitaba indirectamente vía los tests de continuación
+o no se cubría en absoluto. La integración no cambia su comportamiento
+en runtime — esto es puramente endurecimiento de la red de regresión
+para que futuras refactorizaciones no rompan invariantes silenciosos.
+
+#### `tests/test_store_extras.py` (16 tests)
+
+`ReadingStore` solo tenía tests para la baseline-carry-over de
+v0.5.12. El resto de su API (dedup, meter summary, reset, clear,
+serialización, tolerancia a corrupción) iba sin guard. Ahora cubierto:
+
+- **Dedup semántico**: re-ingerir el mismo `(contract, timestamp)`
+  hace upsert in-place, no añade fila duplicada. El bookmarklet siempre
+  re-baja la ventana visible completa, así que cada POST contiene
+  solapamiento — sin dedup, el cache se duplicaría a cada click.
+- **Conteo de filas NEW**: `async_replace` devuelve sólo las filas que
+  no existían antes (no in-place updates) — el log de operación se
+  apoya en este número para distinguir "POST trajo nueva data" de
+  "POST repitió lo que ya tenía".
+- **Preservación de meter_summary**: un POST sin `meter_summary` NO
+  borra el anterior. La fast-path del bookmarklet (cuando solo se
+  re-postea el CSV cacheado del navegador) podría perder el contador
+  absoluto sin esta garantía.
+- **Reemplazo de meter_summary**: cuando viene uno nuevo, sustituye
+  al anterior wholesale.
+- **`last_ingest_at` siempre avanza**: dos POSTs consecutivos
+  reflejan el segundo timestamp. El sensor `data_age_minutes` se
+  apoya en esto para mostrar frescura.
+- **Propiedad `contracts`**: deduplica IDs y descarta el contract
+  vacío. Usado por `clear_cost_stats` y `reset_meter` para iterar
+  los contratos a operar.
+- **`async_clear` lo borra todo**: readings, meter, baseline,
+  last_ingest_at, y el fichero de disco. Usado por
+  `async_remove_entry`. El `_StubStore` registra `removed=True`
+  para verificar que tocamos disco.
+- **`async_reset_baseline` (v0.5.16) en aislamiento**: borra el
+  baseline DE UN solo contrato, sin tocar readings, meter_summary,
+  ni los baselines de OTROS contratos. Crítico: si rompemos esto,
+  resetear el contador de un contrato corrompe el otro.
+- **`async_reset_baseline` con contrato desconocido**: no-op
+  silencioso, no escribe a disco. Sin esto, un servicio mal
+  invocado generaría writes innecesarios y podría enmascarar
+  bugs reales.
+- **Round-trip de meter_summary**: serialise + reload reconstruye
+  todos los campos, incluyendo `reading_at` con su parsing de ISO.
+- **Tolerancia de `_meter_summary_from_dict` a basura**: `None`,
+  string, dict vacío, `reading_liters` no numérico → todos
+  devuelven `None` sin crash.
+- **`_meter_summary_from_dict` con `reading_at` corrupto**:
+  fallback a `None` en vez de propagar el ValueError.
+- **`_reading_from_dict` levanta en input malformado**: pin la
+  superficie de excepción que el loader captura para skipear filas
+  corruptas. Si silenciamos esa raise, el loader pasaría la basura
+  al cache.
+- **`async_load` skipea filas corruptas**: 4 filas (2 buenas, 2
+  malas) → cache con 2 filas, sin crash. Modela un fichero de
+  store medio-flusheado tras un reboot abrupto.
+- **`async_load` tolera baseline malformado**: `baseline_liters`
+  con valores no numéricos mezclados con buenos → solo los buenos
+  sobreviven, sin crash.
+
+#### `tests/test_ingest_helpers.py` (10 tests)
+
+`ingest.py` es mayormente HA-bound (aiohttp Request, HomeAssistantView,
+hass.config_entries) pero sus helpers puros se pueden ejercitar con
+stubs minimales. Cubierto:
+
+- **`_extract_bearer` con header estándar**: parse correcto del
+  formato `Bearer <token>`.
+- **`_extract_bearer` strippea whitespace**: bookmarklets pegados
+  con newlines colaterales no rompen la auth.
+- **`_extract_bearer` case-insensitive en el scheme** (RFC 6750):
+  `Bearer`, `bearer`, `BEARER`, `BeArEr` → todos funcionan.
+- **`_extract_bearer` rechaza otros schemes**: `Basic`, `Token`,
+  raw token sin prefijo → empty string. El caller responde 401.
+- **`_extract_bearer` sin header**: empty string sin crash.
+- **`_extract_bearer` con `Bearer ` sin token**: empty string. Sin
+  esto, el caller validaría `compare_digest("", expected)` y
+  retornaría 401, lo cual es lo correcto pero menos eficiente.
+- **`_json` con status custom propaga**: 200, 418, 4xx, 5xx — no
+  hay coerción accidental de status code.
+- **`_error` produce shape canónico**: `{ok: false, code, detail}`.
+  El bookmarklet lee estas claves literales en el navegador del
+  usuario; un typo aquí rompe el mensaje de error visible.
+- **`_error` propaga status**: 400, 401, 404, 409, 413, 500 → el
+  status del response coincide.
+
+#### `tests/test_coordinator.py` (7 tests)
+
+`CanalCoordinator` es deliberadamente delgado — delega todo a
+`ReadingStore`. Esa delegación es la API que los sensores usan, y
+si una refactor accidentalmente inlinea estado en el coordinador,
+los sensores leen datos stale tras un POST de ingest (invisible
+hasta que el usuario nota que la tarjeta no avanza). Cubierto:
+
+- **`meter_summary` delega al store**: identidad por `is`, no copia.
+- **`meter_summary` devuelve `None` si el store está vacío**.
+- **`baseline_liters` delega al store**: contenido idéntico.
+- **`baseline_liters` devuelve copia**: mutar el resultado no
+  afecta lecturas posteriores (hereda del contrato del store).
+- **`_async_update_data` devuelve `store.readings`**: sin
+  transformación, sin I/O. Es la fuente que `DataUpdateCoordinator`
+  pasa a los sensores.
+- **`_async_update_data` con store fresco**: devuelve `[]`, no
+  `None` ni excepción.
+- **El coordinator preserva `entry` y `store`**: los handlers de
+  servicios (`clear_cost_stats`, `reset_meter`) los necesitan
+  accesibles vía `coord.entry` / `coord.store`.
+
+### Verificación
+
+- 227 tests pasan (194 → 227, **+33 tests nuevos**).
+- `ruff check` y `ruff format --check`: limpios.
+- Cero cambios en código de producción — solo nuevos ficheros bajo
+  `tests/`. La integración funciona idéntica a v0.5.18.
+
+### Notas técnicas
+
+Los tres ficheros nuevos comparten el patrón de **stub de HA antes
+de importar el módulo bajo test** (`sys.modules['homeassistant.*']
+= ModuleType(...)` antes del `importlib.spec_from_file_location`).
+El stub `_StubStore` se mantiene compatible entre los tres ficheros
+(expone `saved` y `removed`) porque `sys.modules` es process-global
+y el primer test que importa "gana" — un stub más pobre rompería
+los tests del otro fichero según el orden de pytest.
+
 ## [0.5.18] — 2026-04-26
 
 ### Añadido
