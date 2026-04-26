@@ -577,12 +577,21 @@ Si vienes de v0.5.20 o anterior y ya tienes barras negativas
 **heredadas** en el recorder (corruption persistente, sobrevive a
 reinicios), ejecuta **una vez** el servicio
 **`canal_isabel_ii.clear_cost_stats`** desde *Dev Tools →
-Acciones*. Borra las stats antiguas y la integración republica la
-serie monótona desde cero en el siguiente tick del coordinator
-(≤ 1 min). Refresca el navegador y la barra negativa desaparece.
+Acciones*. Borra las stats antiguas, **resetea el guard
+antirregresión de la entidad viva** (v0.5.22+) y la integración
+republica la serie monótona desde cero en el siguiente tick del
+coordinator (≤ 1 min). Refresca el navegador y la barra negativa
+desaparece.
+
+> **Importante**: si estás en v0.5.21, el servicio limpia el
+> recorder pero la entidad se queda congelada en el último valor
+> alto (la columna *Coste* del panel Energía marca **0 € para
+> todos los meses** indefinidamente). Actualiza a **v0.5.22+**
+> antes de invocar el servicio — esa versión añade el reset del
+> guard al pipeline del clear, que es lo que cierra el bucle.
 
 A partir de ese momento ya no necesitas volver a llamarlo: con
-v0.5.21 instalada, los reinicios de HA, los trims de cache, los
+v0.5.21+ instalada, los reinicios de HA, los trims de cache, los
 cambios de parámetros tarifarios y las recomputaciones por
 fronteras de vigencia dejan de producir barras negativas sin
 intervención manual.

@@ -3,6 +3,108 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.5.22] — 2026-04-26
+
+### Arreglado — `clear_cost_stats` dejaba la entidad de coste congelada
+
+Tras instalar v0.5.21, ejecutar `canal_isabel_ii.clear_cost_stats`
+borraba las stats del recorder (correcto) pero **no reseteaba el
+guard antirregresión en memoria** del sensor de coste. Resultado
+visible: la columna *Coste* del panel Energía se quedaba en
+**0,00 € para todos los meses indefinidamente**, con el sensor
+congelado en el último valor alto pre-clear y el push siempre
+saltando por regresión detectada contra ese ancla obsoleta.
+
+Diagnóstico observado en MF1: tras update v0.5.20 → v0.5.21 +
+`clear_cost_stats`, la entidad seguía retornando 150,54 €
+mientras el stream calculaba 111,84 € desde la cache reducida.
+Cada tick: `Cost stream regressed (111.84 < 150.54); skipping
+recorder push` (correcto, el guard hace su trabajo). Pero como
+el recorder estaba vacío y el push no entraba, el panel mostraba
+0 € permanente. La cache solo crecería de vuelta a 150 € tras
+semanas de consumo real.
+
+#### Causa raíz
+
+v0.5.21 introdujo el guard simétrico `is_cost_stream_regression`
+en `native_value` y en `_push_cost_statistics_locked`. Diseñado
+para preservar monotonicidad cuando el stream calculado cae por
+debajo del valor restaurado de disco — y eso funciona. El gap:
+el servicio de recovery `clear_cost_stats` solo tocaba el
+recorder vía `async_clear_statistics`, sin avisar al sensor vivo
+para que dropease su `_restored_value` en memoria. Sin ese
+reseteo, el predicado del guard sigue evaluando contra el ancla
+vieja y nunca permite republicar.
+
+#### Cambiado
+
+- **`const.py`**: nueva señal de dispatcher
+  `SIGNAL_CLEAR_COST_STATS` con formato
+  `{entry_id}_{contract_id}` (mismo patrón que
+  `SIGNAL_METER_RESET`).
+- **`sensor.py` — `CanalCumulativeCostSensor`**: subscribe a la
+  señal en `async_added_to_hass`. Nuevo handler
+  `_on_clear_cost_stats` que resetea `_restored_value = None` y
+  llama a `async_write_ha_state()`. Mismo shape exacto que
+  `_on_meter_reset` — la diferencia es semántica (reset por wipe
+  de stats vs. reset por cambio de contador físico) y queda
+  reflejada en el log para diagnóstico.
+- **`__init__.py` — `_clear_cost_stats_for_entry`**: tras
+  `recorder.async_clear_statistics(...)`, dispatcha la nueva señal
+  para cada contract de la entry. El próximo tick del coordinator
+  recompone `native_value` contra `_restored_value=None` (sin
+  guard que aplicar) y `_push_cost_statistics_locked` empuja
+  desde cero limpio.
+
+Con este wiring, el flujo de recovery documentado en la FAQ
+(*FAQ → "El panel Energía → Agua muestra una barra negativa"*)
+funciona end-to-end: una sola llamada a `clear_cost_stats` y la
+serie se rehidrata en el siguiente tick.
+
+#### Recuperación tras actualizar (MF1 y similares atascados en 0 €)
+
+1. Actualiza a v0.5.22 vía HACS.
+2. *Dev Tools → Acciones* → `canal_isabel_ii.clear_cost_stats` →
+   *Llamar al servicio*.
+3. Espera un tick del coordinator (≤ 1 min). El log mostrará:
+   ```
+   [<contract>] Cumulative cost: clear_cost_stats signal received
+     (was 150.54); clearing monotonic guard so next push rebuilds
+     the recorder series from cold-start
+   ```
+4. Refresca el panel Energía → Agua. La columna *Coste* vuelve a
+   poblar bimestre a bimestre conforme el push avanza.
+
+#### Tests
+
+7 tests nuevos en `tests/test_clear_cost_stats_dispatch.py`
+(introspección AST + grep, sin runtime de HA — mismo patrón que
+`test_services_yaml.py`):
+
+- Constante de señal existe en `const.py` con los placeholders
+  correctos (`{entry_id}` + `{contract_id}`).
+- `__init__.py` importa la señal y la dispatcha vía
+  `async_dispatcher_send`.
+- `sensor.py` importa la señal y la conecta vía
+  `async_dispatcher_connect`.
+- Sender y receiver usan el mismo identificador (anti-typo).
+- El dispatch ocurre dentro de `_clear_cost_stats_for_entry`
+  (no en `async_setup_entry`, donde dispararía en cada boot).
+- El connect ocurre dentro de
+  `CanalCumulativeCostSensor.async_added_to_hass` (no en otro
+  método donde la entidad no esté lista).
+- El handler `_on_clear_cost_stats` realmente asigna
+  `self._restored_value = None` (no es no-op).
+
+Si alguno de estos invariantes se rompe, el flujo de recovery
+deja de funcionar y los usuarios vuelven al freeze de v0.5.21.
+
+#### FAQ actualizada
+
+`docs/USE.md` señala explícitamente que en v0.5.21
+`clear_cost_stats` no era suficiente y dirige a actualizar a
+v0.5.22+ antes de invocar el servicio.
+
 ## [0.5.21] — 2026-04-26
 
 ### Arreglado — barras negativas recurrentes en el panel Energía

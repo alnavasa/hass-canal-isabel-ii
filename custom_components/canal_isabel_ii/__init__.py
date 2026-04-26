@@ -70,6 +70,7 @@ from .const import (
     DEFAULT_IVA_PCT,
     DEFAULT_N_VIVIENDAS,
     DOMAIN,
+    SIGNAL_CLEAR_COST_STATS,
     SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
@@ -461,6 +462,26 @@ async def _clear_cost_stats_for_entry(
     )
     recorder = get_recorder_instance(hass)
     recorder.async_clear_statistics(stat_ids)
+
+    # v0.5.22: notify the live cost sensors so they drop their
+    # in-memory ``_restored_value``. Without this, v0.5.21's symmetric
+    # regression guard would freeze the entity on the pre-clear high
+    # forever — the recorder is empty after the wipe but the entity
+    # keeps reporting the old value, the guard sees a regression
+    # against that stale anchor on every tick, the push is skipped
+    # and the Energy panel reads 0 € indefinitely. Firing the signal
+    # AFTER ``async_clear_statistics`` (queued on the recorder) is
+    # safe: the next coordinator tick will recompute against
+    # ``_restored_value=None`` and push from cold-start; the recorder
+    # will have applied the clear by then or will apply the new push
+    # idempotently — either way the series ends monotonic.
+    for contract in contracts:
+        async_dispatcher_send(
+            hass,
+            SIGNAL_CLEAR_COST_STATS.format(
+                entry_id=entry.entry_id, contract_id=contract
+            ),
+        )
 
 
 async def _migrate_cost_stats_v054(

@@ -51,6 +51,7 @@ from .const import (
     CONF_NAME,
     DEFAULT_NAME,
     DOMAIN,
+    SIGNAL_CLEAR_COST_STATS,
     SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
@@ -861,6 +862,25 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
                 self._on_meter_reset,
             )
         )
+        # Subscribe to ``canal_isabel_ii.clear_cost_stats`` (v0.5.22+).
+        # Without this, the v0.5.21 symmetric regression guard freezes
+        # the entity at the pre-clear restored value forever: the
+        # service drops the recorder series, but ``_restored_value``
+        # stays at the high mark, every subsequent ``native_value``
+        # call returns it (regression detected), and the push is
+        # blocked on the same predicate. Net effect: 0 € forever in
+        # the Energy panel after running the service. This handler
+        # closes the loop so the recovery procedure documented in the
+        # FAQ actually recovers.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_CLEAR_COST_STATS.format(
+                    entry_id=self._entry_id, contract_id=self._contract_id
+                ),
+                self._on_clear_cost_stats,
+            )
+        )
         self._handle_coordinator_update()
 
     def _on_meter_reset(self) -> None:
@@ -868,6 +888,28 @@ class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin
         _LOGGER.info(
             "[%s] Cumulative cost: meter reset signal received "
             "(was %.2f); clearing monotonic guard",
+            self._contract_id,
+            self._restored_value or 0.0,
+        )
+        self._restored_value = None
+        self.async_write_ha_state()
+
+    def _on_clear_cost_stats(self) -> None:
+        """Clear the cumulative-cost monotonic guard after a stats wipe.
+
+        Mirror of :meth:`_on_meter_reset` but driven by the
+        ``clear_cost_stats`` service. Same effect on this entity (drop
+        the in-memory ``_restored_value`` so the next coordinator tick
+        rebuilds from the fresh stream); the difference is intent —
+        meter swap means the physical counter changed, while stats
+        wipe means the user is recovering from a recorder corruption
+        and the meter is unchanged. Logged separately so operators
+        can tell which event drove the reset when reading the log.
+        """
+        _LOGGER.info(
+            "[%s] Cumulative cost: clear_cost_stats signal received "
+            "(was %.2f); clearing monotonic guard so next push "
+            "rebuilds the recorder series from cold-start",
             self._contract_id,
             self._restored_value or 0.0,
         )

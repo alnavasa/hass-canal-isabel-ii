@@ -175,3 +175,26 @@ MAX_READINGS_PER_ENTRY = 8760
 #: history and the next push anchors to ``last_sum`` so the Energy
 #: panel keeps a continuous curve across the meter swap.
 SIGNAL_METER_RESET = "canal_isabel_ii_meter_reset_{entry_id}_{contract_id}"
+
+#: Dispatcher signal fired by the ``clear_cost_stats`` service after
+#: ``recorder.async_clear_statistics`` has cleared the cost
+#: ``statistic_id`` for a contract. Format with ``entry_id`` and
+#: ``contract_id`` so multi-contract entries can be cleared
+#: independently:
+#:
+#:     SIGNAL_CLEAR_COST_STATS.format(entry_id=eid, contract_id=cid)
+#:
+#: ``CanalCumulativeCostSensor`` subscribes to this signal in
+#: ``async_added_to_hass`` and resets its in-memory
+#: ``_restored_value`` to ``None``. Without this, v0.5.21's symmetric
+#: regression guard (which protects both ``native_value`` and the
+#: recorder push) would keep returning the stale restored value
+#: forever after a cache shrink: the recorder is empty after the
+#: clear, but the entity still reports the pre-clear high, the guard
+#: still sees a regression and skips every subsequent push, and the
+#: Energy panel renders 0 € for the cost column indefinitely. Firing
+#: this signal closes the loop — the next coordinator tick recomputes
+#: ``native_value`` against ``_restored_value=None`` (no guard
+#: applies), the push goes through cold-start, and the panel
+#: rehydrates within minutes.
+SIGNAL_CLEAR_COST_STATS = "canal_isabel_ii_clear_cost_stats_{entry_id}_{contract_id}"
