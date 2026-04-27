@@ -98,6 +98,38 @@ def _install_stubs() -> None:
         http.HomeAssistantView = _HomeAssistantView
         _sys.modules["homeassistant.components.http"] = http
 
+    # v0.6.0: ingest.py now imports from .cost_publisher, which top-level
+    # imports homeassistant.components.recorder (+ submodules) and
+    # homeassistant.util.dt. We don't exercise any of these here — the
+    # tests only call pure helpers in ingest — so the stubs only need to
+    # exist as sys.modules entries so the imports resolve without
+    # ImportError. Any attempt by a future test to actually call into
+    # these will fail loudly, which is the desired signal.
+    if "homeassistant.components.recorder" not in _sys.modules:
+        recorder = _types.ModuleType("homeassistant.components.recorder")
+        recorder.get_instance = MagicMock()
+        _sys.modules["homeassistant.components.recorder"] = recorder
+    if "homeassistant.components.recorder.models" not in _sys.modules:
+        rec_models = _types.ModuleType("homeassistant.components.recorder.models")
+        rec_models.StatisticData = MagicMock
+        rec_models.StatisticMeanType = MagicMock()
+        rec_models.StatisticMetaData = MagicMock
+        _sys.modules["homeassistant.components.recorder.models"] = rec_models
+    if "homeassistant.components.recorder.statistics" not in _sys.modules:
+        rec_stats = _types.ModuleType("homeassistant.components.recorder.statistics")
+        rec_stats.async_add_external_statistics = MagicMock()
+        rec_stats.get_last_statistics = MagicMock()
+        rec_stats.statistics_during_period = MagicMock()
+        _sys.modules["homeassistant.components.recorder.statistics"] = rec_stats
+    if "homeassistant.util" not in _sys.modules:
+        _sys.modules["homeassistant.util"] = _types.ModuleType("homeassistant.util")
+    if "homeassistant.util.dt" not in _sys.modules:
+        ha_dt = _types.ModuleType("homeassistant.util.dt")
+        ha_dt.utcnow = MagicMock()
+        ha_dt.as_utc = MagicMock()
+        ha_dt.as_local = MagicMock()
+        _sys.modules["homeassistant.util.dt"] = ha_dt
+
 
 def _load_ingest_module():
     repo = Path(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -127,6 +159,13 @@ def _load_ingest_module():
     _load("models")
     _load("csv_parser")
     _load("meter_summary_parser")
+    # v0.6.0: ingest also depends on cost_publisher, which in turn
+    # depends on tariff + statistics_helpers (both HA-free). Pre-load
+    # them so the relative imports inside cost_publisher resolve to the
+    # same fake-package copies.
+    _load("statistics_helpers")
+    _load("tariff")
+    _load("cost_publisher")
     return _load("ingest")
 
 

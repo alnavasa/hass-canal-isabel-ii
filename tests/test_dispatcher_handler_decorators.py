@@ -2,24 +2,22 @@
 
 ## Why this test exists
 
-v0.5.22 wired ``CanalCumulativeCostSensor._on_clear_cost_stats`` to the
-new ``SIGNAL_CLEAR_COST_STATS`` dispatcher signal so that running the
-``clear_cost_stats`` service drops the in-memory ``_restored_value``
-guard. The recovery worked end-to-end on MF1 — the Energy panel
-recovered from 0 € to the real bimonthly value (e.g. 15,13 € for
-March) — **but** the HA log filled with ERROR tracebacks::
+v0.5.22 wired dispatcher signals into sync entity methods so that
+running services (``reset_meter``, and previously ``clear_cost_stats``)
+could clear in-memory monotonic guards. The recovery worked end-to-end
+on MF1 — the Energy panel recovered from 0 to the real value — **but**
+the HA log filled with ERROR tracebacks::
 
-    ERROR (SyncWorker_2) Exception in _on_clear_cost_stats:
+    ERROR (SyncWorker_2) Exception in _on_meter_reset:
     RuntimeError: Detected that custom integration 'canal_isabel_ii'
       calls async_write_ha_state from a thread other than the event
       loop ... at custom_components/canal_isabel_ii/sensor.py, line 917
 
-Why: the four dispatcher handlers (``_on_meter_reset`` x 3 sensors +
-``_on_clear_cost_stats`` on the cost sensor) are sync methods. Without
-``@callback`` HA's dispatcher schedules them on the executor thread
-pool, and the trailing ``async_write_ha_state()`` call then trips
-HA 2026.x's thread-safety guard (``report_non_thread_safe_operation``,
-which now raises ``RuntimeError`` instead of just logging a warning).
+Why: dispatcher handlers are sync methods. Without ``@callback`` HA's
+dispatcher schedules them on the executor thread pool, and the
+trailing ``async_write_ha_state()`` call then trips HA 2026.x's
+thread-safety guard (``report_non_thread_safe_operation``, which now
+raises ``RuntimeError`` instead of just logging a warning).
 
 Two things saved v0.5.22 in production:
 
@@ -32,30 +30,34 @@ Two things saved v0.5.22 in production:
 
 But the tracebacks are real: future-HA may upgrade the warning into a
 hard crash that aborts before the assignment, or block the dispatcher
-entirely. And on the three ``_on_meter_reset`` handlers (none of which
-fired in the field yet because nobody had invoked ``reset_meter`` on
-MF1) the same latent bug would show up the moment a user replaces a
-physical meter.
+entirely. The fix (v0.5.23): mark every dispatcher handler ``@callback``
+so HA invokes it on the event loop directly. ``async_write_ha_state``
+is then safe.
 
-The fix (v0.5.23): mark every dispatcher handler ``@callback`` so HA
-invokes it on the event loop directly. ``async_write_ha_state`` is
-then safe.
+## v0.6.0 update
+
+The cost feature lost its entity layer in v0.6.0 (cost is now a pure
+long-term statistic published from ``cost_publisher.py``), so
+``CanalCumulativeCostSensor`` and its ``_on_clear_cost_stats`` /
+``_on_meter_reset`` handlers are gone. The surviving dispatcher
+handlers are the two ``_on_meter_reset`` methods on
+``CanalCumulativeConsumptionSensor`` and ``CanalMeterReadingSensor``,
+and the same ``@callback`` invariant applies to them.
 
 ## What this test pins
 
-Pure source-introspection (AST), no Home Assistant runtime. Same
-shape as ``test_clear_cost_stats_dispatch.py`` and
-``test_services_yaml.py`` — the bug class is "developer adds a new
-sync handler and forgets the decorator", the defence is "a test that
-fails the moment a handler ships without ``@callback``".
+Pure source-introspection (AST), no Home Assistant runtime. The bug
+class is "developer adds a new sync handler and forgets the
+decorator", the defence is "a test that fails the moment a handler
+ships without ``@callback``".
 
 The assertions:
 
 1. ``sensor.py`` imports ``callback`` from ``homeassistant.core``
    (you cannot decorate without the import).
-2. Every method named ``_on_meter_reset`` or ``_on_clear_cost_stats``
-   inside a class definition carries ``@callback`` as one of its
-   decorators.
+2. Every method named ``_on_meter_reset`` (or any future ``_on_*``
+   handler added to ``_HANDLER_METHOD_NAMES``) inside a class
+   definition carries ``@callback`` as one of its decorators.
 
 If a future contributor adds a new dispatcher handler following the
 ``_on_*`` naming convention, this test catches the missing decorator
@@ -75,7 +77,11 @@ _SENSOR = _PKG / "sensor.py"
 # ``async_added_to_hass``. Update this list when a new dispatcher
 # handler is added; the test will then enforce ``@callback`` on it
 # automatically.
-_HANDLER_METHOD_NAMES = frozenset({"_on_meter_reset", "_on_clear_cost_stats"})
+#
+# v0.6.0: ``_on_clear_cost_stats`` was removed alongside
+# ``CanalCumulativeCostSensor`` — the cost stat is now published from
+# ``cost_publisher.py``, no entity, no dispatcher signal.
+_HANDLER_METHOD_NAMES = frozenset({"_on_meter_reset"})
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -156,7 +162,7 @@ def test_callback_imported_from_homeassistant_core():
 
 
 def test_every_dispatcher_handler_is_marked_callback():
-    """Every ``_on_meter_reset`` / ``_on_clear_cost_stats`` needs ``@callback``.
+    """Every ``_on_meter_reset`` needs ``@callback``.
 
     Without the decorator HA 2026.x raises ``RuntimeError`` from
     ``async_write_ha_state`` because the dispatcher schedules the
@@ -171,13 +177,14 @@ def test_every_dispatcher_handler_is_marked_callback():
     """
     handlers = _collect_dispatcher_handlers()
 
-    # Sanity: at least the four known handlers must be present, otherwise
+    # Sanity: at least the two known handlers must be present, otherwise
     # the test is silently passing because nothing matched the filter.
+    # v0.6.0 collapsed the cost entity, so the cost-side handler
+    # expectations are gone — only the consumption-cumulative and
+    # meter-reading sensors still need the dispatcher wiring.
     expected = {
         ("CanalCumulativeConsumptionSensor", "_on_meter_reset"),
         ("CanalMeterReadingSensor", "_on_meter_reset"),
-        ("CanalCumulativeCostSensor", "_on_meter_reset"),
-        ("CanalCumulativeCostSensor", "_on_clear_cost_stats"),
     }
     found = {(cls, method) for cls, method, _ in handlers}
     missing = expected - found

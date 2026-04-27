@@ -1,4 +1,62 @@
-"""Sensor platform for Canal de Isabel II."""
+"""Sensor platform for Canal de Isabel II.
+
+## v0.6.0 redesign — only three consumption entities
+
+Until v0.5.x this module exposed up to six entities per contract:
+three for consumption (hourly, cumulative, meter reading) and three
+opt-in for cost (cumulative cost, current price, current block).
+
+The three cost entities turned out to be the source of every
+spike/regression bug from v0.5.20 to v0.5.23. Their problem was
+structural: they re-derived a cumulative-€ stream on every coordinator
+tick from a cache that can shift over time, while at the same time
+acting as a publisher for the long-term ``canal_isabel_ii:cost_<contract>``
+statistic. Whenever the recomputed stream drifted below the entity's
+in-memory ``_restored_value`` the recorder push and the entity state
+diverged, and the Energy panel rendered the seam as a negative bar.
+
+The user's framing cuts the knot:
+
+> "no hay coste vivido en este segundo nunca, las lecturas vienen con
+> un lag mínimo de 12 horas, es absurdo tener eso como patrón
+> importante."
+
+Canal de Isabel II publishes hourly readings with a **minimum 12 hour
+lag**, never live. So "live cost in this second" was always fiction
+and recomputing every tick just to refresh that fiction was the source
+of every divergence.
+
+v0.6.0 splits cost out of the entity layer entirely. The cost stream
+is now published by ``cost_publisher.py``, called once per successful
+POST from the ingest endpoint. There is no entity that mirrors the
+statistic; users see cost in the Energy panel by picking the external
+statistic ``<install> - Canal de Isabel II coste`` directly. See
+``cost_publisher.py`` and ``docs/v0.6.0-redesign.md`` for the full
+rationale.
+
+## What this module exposes (per contract)
+
+1. ``CanalHourlyConsumptionSensor``  — most recent hourly delta in L,
+   ``state_class=TOTAL``. UI sensor — not used by Energy panel.
+2. ``CanalCumulativeConsumptionSensor`` — running total in L,
+   ``state_class=TOTAL_INCREASING``. Owns the push to the long-term
+   statistic ``canal_isabel_ii:consumption_<contract>`` (which the
+   Energy panel reads to render the water bars). Spike-immune via the
+   ``continuation_stats`` / ``merge_forward_and_backfill`` pipeline in
+   ``statistics_helpers``.
+3. ``CanalMeterReadingSensor`` — absolute meter reading in m³,
+   ``state_class=TOTAL_INCREASING``. Mirrors the "Última lectura"
+   panel from the portal; lets the user cross-check the bill against
+   HA's accumulated usage.
+
+All three are wired to ``SIGNAL_METER_RESET`` so the
+``reset_meter`` service can clear their in-memory monotonic guard
+when the physical counter is replaced. The dispatcher handlers are
+``@callback`` so HA invokes them on the event loop directly (without
+the decorator HA 2026.x raises ``RuntimeError`` from
+``async_write_ha_state``; see v0.5.23 for the original fix and
+``tests/test_dispatcher_handler_decorators.py`` for the AST guard).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +73,6 @@ from homeassistant.components.recorder.models import (
 )
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    async_import_statistics,
     get_last_statistics,
     statistics_during_period,
 )
@@ -38,20 +95,13 @@ from homeassistant.util.unit_conversion import VolumeConverter
 from .attribute_helpers import (
     TimedReading,
     data_age_minutes,
-    sum_for_local_bimonth,
     sum_for_local_day,
     sum_for_rolling_window,
 )
 from .const import (
-    CONF_CUOTA_SUPL_ALC,
-    CONF_DIAMETRO_MM,
-    CONF_ENABLE_COST,
-    CONF_IVA_PCT,
-    CONF_N_VIVIENDAS,
     CONF_NAME,
     DEFAULT_NAME,
     DOMAIN,
-    SIGNAL_CLEAR_COST_STATS,
     SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
@@ -59,19 +109,8 @@ from .coordinator import CanalCoordinator
 from .models import MeterSummary, Reading
 from .statistics_helpers import (
     continuation_stats,
-    cumulative_to_deltas,
-    is_cost_stream_regression,
     merge_forward_and_backfill,
     needs_backfill,
-)
-from .tariff import (
-    TariffParams,
-    bimonth_for,
-    block_thresholds,
-    compute_hourly_cost_stream,
-    split_into_blocks,
-    variable_cost_eur,
-    vigencia_for,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,11 +136,16 @@ async def async_setup_entry(
     * They click the bookmarklet for the first time → the integration
       reloads and the three sensors per contract appear.
     * Subsequent clicks just refresh values (no reload).
+
+    v0.6.0 deliberately does **not** create cost entities even when
+    ``enable_cost`` is true: the cost feature is now expressed solely
+    as the long-term statistic ``canal_isabel_ii:cost_<contract>``,
+    populated by ``cost_publisher.py`` on every POST. See the module
+    docstring for the full rationale.
     """
     cache = hass.data[DOMAIN][entry.entry_id]
     coordinator: CanalCoordinator = cache["coordinator"]
     install_name = (entry.data.get(CONF_NAME) or entry.title or DEFAULT_NAME).strip()
-    cost_settings: dict[str, Any] = cache.get("cost") or {}
 
     contracts: dict[str, Reading] = {}
     for row in coordinator.data or []:
@@ -123,39 +167,8 @@ async def async_setup_entry(
             CanalCumulativeConsumptionSensor(coordinator, entry, install_name, contract)
         )
         entities.append(CanalMeterReadingSensor(coordinator, entry, install_name, contract))
-        if cost_settings.get(CONF_ENABLE_COST):
-            tariff_params = _tariff_params_from_settings(cost_settings)
-            currency = hass.config.currency or "EUR"
-            entities.append(
-                CanalCumulativeCostSensor(
-                    coordinator, entry, install_name, contract, tariff_params, currency
-                )
-            )
-            entities.append(
-                CanalCurrentPriceSensor(
-                    coordinator, entry, install_name, contract, tariff_params, currency
-                )
-            )
-            entities.append(
-                CanalCurrentBlockSensor(coordinator, entry, install_name, contract, tariff_params)
-            )
 
     async_add_entities(entities)
-
-
-def _tariff_params_from_settings(settings: dict[str, Any]) -> TariffParams:
-    """Build a :class:`TariffParams` from the cached entry settings.
-
-    The cache dict is built by ``__init__._resolve_cost_settings`` and
-    always has the four keys with sensible defaults, so this never
-    raises on missing fields.
-    """
-    return TariffParams(
-        diametro_mm=int(settings[CONF_DIAMETRO_MM]),
-        n_viviendas=int(settings[CONF_N_VIVIENDAS]),
-        cuota_supl_alc_eur_m3=float(settings[CONF_CUOTA_SUPL_ALC]),
-        iva_pct=float(settings[CONF_IVA_PCT]),
-    )
 
 
 class _ContractSensor(CoordinatorEntity[CanalCoordinator], SensorEntity):
@@ -745,694 +758,3 @@ class CanalMeterReadingSensor(_ContractSensor, RestoreSensor):
             if summary.raw_reading:
                 attrs["raw_reading"] = summary.raw_reading
         return attrs
-
-
-# =====================================================================
-# Cost sensors (opt-in via the ``enable_cost`` config-flow checkbox)
-# =====================================================================
-#
-# All three sensors below share a TariffParams instance built once at
-# entity-creation time. If the user edits the cost params via the
-# OptionsFlow, ``__init__._async_update_listener`` reloads the entry
-# entirely so these entities are torn down and re-created with fresh
-# params — there's no in-place param swap.
-#
-# The cost sensors do NOT contribute to the consumption-side
-# external statistics (``canal_isabel_ii:consumption_<contract>``).
-# They publish their own ``canal_isabel_ii:cost_<contract>`` series so
-# the Energy panel can chart cost separately from m³.
-
-
-class _CostSensorMixin:
-    """Shared params + helpers for the three cost sensors.
-
-    Every cost sensor needs the same TariffParams + a way to look at
-    the current bimonth's accumulated m³, so we factor that here. Not
-    a full base class because we still inherit from ``_ContractSensor``
-    for the device-grouping + contract-row helpers.
-    """
-
-    _params: TariffParams
-
-    def _bimonth_consumo_m3(self: _ContractSensor) -> float:  # type: ignore[misc]
-        """Sum of m³ already consumed in the current calendar bimonth.
-
-        Used to decide which tariff block the next m³ would fall into,
-        which drives both the current-block and current-price sensors.
-
-        Bug 2.3 (v0.5.14): the comparison runs in **local civil time**.
-        ``r.timestamp`` may be naive (provider quirk) or UTC-aware (most
-        common after the recorder round-trips); calling ``.date()``
-        directly on a UTC-aware timestamp returns the UTC date, which
-        on a bimonth-boundary hour (e.g. 2026-01-01 00:30 Madrid local
-        = 2025-12-31 23:30 UTC) used to land the reading in the wrong
-        bimonth and freeze the current-block sensor for a few hours.
-        ``sum_for_local_bimonth`` does the conversion explicitly.
-        """
-        now = dt_util.now()
-        b_start, b_end = bimonth_for(now.date())
-        rows = [TimedReading(timestamp=r.timestamp, liters=r.liters) for r in self._rows()]
-        total_l = sum_for_local_bimonth(
-            rows,
-            bimonth_start=b_start,
-            bimonth_end=b_end,
-            local_tz=dt_util.DEFAULT_TIME_ZONE,
-        )
-        return total_l / 1000.0
-
-
-class CanalCumulativeCostSensor(_ContractSensor, RestoreSensor, _CostSensorMixin):
-    """Running cost (€) for a contract — feeds the Energy panel.
-
-    Parallels :class:`CanalCumulativeConsumptionSensor` but for money:
-    same RestoreSensor pattern (state survives restarts), same
-    long-term-statistics push pattern (so the Energy panel's "Money
-    tracking" mode picks it up). The numeric series is built by
-    :func:`compute_hourly_cost_stream`, which:
-
-    - groups the cached readings by calendar bimonth,
-    - prices each one against the right vigencia,
-    - distributes cuota fija evenly across the period's hours,
-    - emits a monotone cumulative-€ stream.
-
-    The state value (``native_value``) is the most recent
-    ``cumulative_eur`` from that stream — i.e. "total € spent so far",
-    matching what HA shows on the entity card.
-
-    State class is ``TOTAL`` rather than ``TOTAL_INCREASING``: HA's
-    monetary device class strictly disallows ``TOTAL_INCREASING``
-    (a monotone-increasing money value with auto-reset detection
-    doesn't model real-world money — refunds / corrections can
-    decrease it). ``TOTAL`` is the compliant choice for cumulative
-    monetary values; we never publish ``last_reset`` so HA treats
-    the series as a pure accumulator, which is what we want.
-    """
-
-    _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
-    _attr_icon = "mdi:cash"
-    _attr_translation_key = "cumulative_cost"
-    _attr_suggested_display_precision = 2
-
-    def __init__(
-        self,
-        coordinator: CanalCoordinator,
-        entry: ConfigEntry,
-        install_name: str,
-        contract_id: str,
-        params: TariffParams,
-        currency: str,
-    ) -> None:
-        super().__init__(coordinator, entry, install_name, contract_id)
-        self._params = params
-        self._attr_native_unit_of_measurement = currency
-        self._attr_name = "Canal Coste acumulado"
-        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_cumulative_cost"
-        self._restored_value: float | None = None
-        # Same rationale as the consumption sensor's ``_push_lock``:
-        # serialise every call to ``_push_cost_statistics`` for THIS
-        # entity so the initial push from ``async_added_to_hass`` and a
-        # coordinator-driven push that arrives at the same time can't
-        # interleave their recorder read-modify-write cycles.
-        self._push_lock = asyncio.Lock()
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_sensor_data()
-        if last and last.native_value is not None:
-            try:
-                self._restored_value = float(last.native_value)
-            except (TypeError, ValueError):
-                self._restored_value = None
-        # Subscribe to ``canal_isabel_ii.reset_meter`` (v0.5.16+).
-        # The cost stream restarts from near-zero after a meter swap
-        # too; without this, the same monotonic guard that protects
-        # the consumption sensor would keep the entity card frozen on
-        # the pre-swap total. Long-term cost statistics are NOT
-        # touched — the recorder series anchors to its own ``last_sum``
-        # and continues forward across the swap.
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_METER_RESET.format(entry_id=self._entry_id, contract_id=self._contract_id),
-                self._on_meter_reset,
-            )
-        )
-        # Subscribe to ``canal_isabel_ii.clear_cost_stats`` (v0.5.22+).
-        # Without this, the v0.5.21 symmetric regression guard freezes
-        # the entity at the pre-clear restored value forever: the
-        # service drops the recorder series, but ``_restored_value``
-        # stays at the high mark, every subsequent ``native_value``
-        # call returns it (regression detected), and the push is
-        # blocked on the same predicate. Net effect: 0 € forever in
-        # the Energy panel after running the service. This handler
-        # closes the loop so the recovery procedure documented in the
-        # FAQ actually recovers.
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_CLEAR_COST_STATS.format(
-                    entry_id=self._entry_id, contract_id=self._contract_id
-                ),
-                self._on_clear_cost_stats,
-            )
-        )
-        self._handle_coordinator_update()
-
-    @callback
-    def _on_meter_reset(self) -> None:
-        """Clear the cumulative-cost monotonic guard.
-
-        ``@callback`` keeps HA's dispatcher on the event loop — see
-        :meth:`CanalCumulativeConsumptionSensor._on_meter_reset` for
-        the full thread-safety rationale.
-        """
-        _LOGGER.info(
-            "[%s] Cumulative cost: meter reset signal received "
-            "(was %.2f); clearing monotonic guard",
-            self._contract_id,
-            self._restored_value or 0.0,
-        )
-        self._restored_value = None
-        self.async_write_ha_state()
-
-    @callback
-    def _on_clear_cost_stats(self) -> None:
-        """Clear the cumulative-cost monotonic guard after a stats wipe.
-
-        Mirror of :meth:`_on_meter_reset` but driven by the
-        ``clear_cost_stats`` service. Same effect on this entity (drop
-        the in-memory ``_restored_value`` so the next coordinator tick
-        rebuilds from the fresh stream); the difference is intent —
-        meter swap means the physical counter changed, while stats
-        wipe means the user is recovering from a recorder corruption
-        and the meter is unchanged. Logged separately so operators
-        can tell which event drove the reset when reading the log.
-
-        ``@callback`` keeps HA's dispatcher on the event loop — see
-        :meth:`CanalCumulativeConsumptionSensor._on_meter_reset` for
-        the full thread-safety rationale (v0.5.23+).
-        """
-        _LOGGER.info(
-            "[%s] Cumulative cost: clear_cost_stats signal received "
-            "(was %.2f); clearing monotonic guard so next push "
-            "rebuilds the recorder series from cold-start",
-            self._contract_id,
-            self._restored_value or 0.0,
-        )
-        self._restored_value = None
-        self.async_write_ha_state()
-
-    def _cost_stream(self) -> list:
-        """Compute the full cost stream for this contract from the cache.
-
-        Returns ``[]`` (degrade gracefully — sensor falls back to the
-        last restored value) if any reading falls outside a known
-        :data:`tariff.VIGENCIAS` window. Without this guard, a single
-        out-of-range timestamp (e.g. an ancient backfill from before
-        vigencia 2025, or a future date past the last vigencia we've
-        shipped) would make :func:`compute_hourly_cost_stream` raise
-        ``ValueError`` from inside ``_split_period_by_vigencia``,
-        propagate up through ``_push_cost_statistics`` and trip the
-        coordinator on every tick. The user would see no cost and a
-        wall of tracebacks. We log a clear warning instead so the
-        next release of the integration (with the missing vigencia
-        appended) silently fixes things.
-        """
-        rows = self._sorted_rows()
-        if not rows:
-            return []
-        local_tz = dt_util.DEFAULT_TIME_ZONE
-        timed: list[tuple[datetime, float]] = []
-        for r in rows:
-            ts = r.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=local_tz)
-            timed.append((ts, r.liters))
-        try:
-            return compute_hourly_cost_stream(timed, self._params)
-        except ValueError as err:
-            _LOGGER.warning(
-                "[%s] Cost stream skipped — at least one reading falls "
-                "outside the known tariff vigencias: %s. The cost sensor "
-                "will keep its last value until the integration ships an "
-                "updated tariff that covers this date range.",
-                self._contract_id,
-                err,
-            )
-            return []
-
-    @property
-    def native_value(self) -> float | None:
-        stream = self._cost_stream()
-        if not stream:
-            return self._restored_value
-        latest = stream[-1].cumulative_eur
-        if is_cost_stream_regression(latest, self._restored_value):
-            # Same rationale as the consumption sensor: a cache wipe
-            # would otherwise look like a meter reset to
-            # TOTAL_INCREASING. The same predicate is checked in
-            # ``_push_cost_statistics_locked`` (v0.5.21+) so the
-            # recorder never sees a regressed sum behind the entity
-            # state's back — that mismatch was the source of the
-            # negative-bar regression that survived ``clear_cost_stats``.
-            _LOGGER.warning(
-                "Cumulative cost dropped (%.2f → %.2f); keeping previous value",
-                self._restored_value,
-                latest,
-            )
-            return self._restored_value
-        self._restored_value = latest
-        return round(latest, 2)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        attrs: dict[str, Any] = {
-            "contract": self._contract_id,
-            "diametro_mm": self._params.diametro_mm,
-            "n_viviendas": self._params.n_viviendas,
-            "cuota_supl_alc_eur_m3": self._params.cuota_supl_alc_eur_m3,
-            "iva_pct": self._params.iva_pct,
-        }
-        return attrs
-
-    def _handle_coordinator_update(self) -> None:
-        # Fire-and-forget — the state value above doesn't depend on
-        # the recorder push completing.
-        self.hass.async_create_task(self._push_cost_statistics())
-        super()._handle_coordinator_update()
-
-    async def _push_cost_statistics(self) -> None:
-        """Push the cumulative-cost stream to long-term statistics.
-
-        We push *twice* with the same data:
-
-        1. **External statistic** ``canal_isabel_ii:cost_<contract>`` —
-           visible in the Energy panel's "cost entity" picker as
-           ``"<install> - Canal de Isabel II coste"``. Power users who
-           prefer the explicit external stat can pick it there.
-
-        2. **Entity statistic** ``sensor.<…>_coste_acumulado`` — the
-           recorder auto-generates stats for any ``total_increasing``
-           sensor, but those auto-stats only start from the moment the
-           sensor was first created. If the cost feature is enabled
-           after the integration has already been collecting data, the
-           entity's stats are nearly empty and the Energy panel shows
-           **0 €** for any reporting period predating the cost feature
-           toggle. By also importing the cumulative stream against the
-           entity's own ``statistic_id``, the panel can pick the entity
-           in its wizard (the obvious UX choice) and still see the full
-           historical cost.
-
-        Both writes are upserts by ``(statistic_id, start)``, so
-        re-running this on every coordinator update is cheap and
-        idempotent. The merge semantics inside
-        :meth:`_submit_running_stats` are spike-immune: cold start is
-        a direct push of the cumulative series; every subsequent push
-        replays the merged delta series from zero, which keeps the
-        Energy panel's per-hour bars (``sum[n] - sum[n-1]``) correct
-        even if a previous version's stats are still mixed in (the
-        ``__init__.py`` migration clears those once on first boot of
-        v0.5.4 so this push only ever has clean values to merge with).
-
-        ## Concurrency
-
-        Wrapped in ``self._push_lock`` (per-entity asyncio.Lock) so the
-        initial push fired from ``async_added_to_hass`` cannot race a
-        coordinator-driven push that arrives milliseconds later. Both
-        invoke :meth:`_submit_running_stats` which does its own
-        read-modify-write against the recorder; without the lock the
-        two would interleave their ``statistics_during_period`` lookup
-        with the other's pending write, producing inconsistent merged
-        deltas.
-        """
-        async with self._push_lock:
-            await self._push_cost_statistics_locked()
-
-    async def _push_cost_statistics_locked(self) -> None:
-        stream = self._cost_stream()
-        if not stream:
-            return
-
-        # v0.5.21 guard: if the stream's latest cumulative_eur has
-        # regressed below the entity's last-known-good value (because
-        # the cache lost an old bimonth, cost params changed, or any
-        # other recompute drift), DO NOT push. The entity state
-        # already holds the previous (higher) value via the same
-        # predicate in ``native_value``; pushing the smaller series
-        # would create a seam in the recorder where ``sum[n] <
-        # sum[n-1]`` and the Energy panel renders that seam as a
-        # large negative bar (~ -38 € for MF1 in v0.5.20). Keeping
-        # both writers (entity state + push) in lockstep on this
-        # predicate eliminates the divergence by construction; the
-        # next coordinator tick will retry, and once the stream
-        # catches back up to ``_restored_value`` the push resumes.
-        latest = stream[-1].cumulative_eur
-        if is_cost_stream_regression(latest, self._restored_value):
-            _LOGGER.warning(
-                "[%s] Cost stream regressed (%.2f < %.2f); "
-                "skipping recorder push to preserve monotonicity. "
-                "Existing long-term statistics retain the previous "
-                "(higher) value; the push resumes once the stream "
-                "catches back up.",
-                self._contract_id,
-                latest,
-                self._restored_value,
-            )
-            return
-
-        currency = self._attr_native_unit_of_measurement or "EUR"
-
-        # Convert the cumulative stream into (utc_ts, cumulative_eur)
-        # pairs ordered chronologically. The cost stream is *already*
-        # a running total — we store ``state=running, sum=running``
-        # directly, no continuation offset needed.
-        items: list[tuple[datetime, float]] = []
-        for hc in stream:
-            ts = hc.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-            items.append((ts.astimezone(dt_util.UTC), hc.cumulative_eur))
-
-        # 1) External statistic — survives even if the entity is
-        #    renamed/deleted and shows up as a separately-pickable
-        #    series in the Energy panel wizard.
-        external_meta = StatisticMetaData(
-            source=STATISTICS_SOURCE,
-            statistic_id=f"{STATISTICS_SOURCE}:cost_{self._contract_id}",
-            has_sum=True,
-            name=f"{self._install_name} - Canal de Isabel II coste",
-            unit_of_measurement=currency,
-            mean_type=StatisticMeanType.NONE,
-            unit_class=None,
-        )
-        await self._submit_running_stats(external_meta, items, async_add_external_statistics)
-
-        # 2) Entity statistic — seeds the recorder series the user sees
-        #    when they pick the sensor in the Energy panel wizard. Skip
-        #    if entity_id isn't bound yet (shouldn't happen because
-        #    _handle_coordinator_update only fires after the entity is
-        #    added, but defensive).
-        if self.entity_id:
-            entity_meta = StatisticMetaData(
-                source="recorder",
-                statistic_id=self.entity_id,
-                has_sum=True,
-                name=None,  # entity's friendly_name takes over
-                unit_of_measurement=currency,
-                mean_type=StatisticMeanType.NONE,
-                unit_class=None,
-            )
-            await self._submit_running_stats(entity_meta, items, async_import_statistics)
-
-    async def _submit_running_stats(
-        self,
-        metadata: StatisticMetaData,
-        items: list[tuple[datetime, float]],
-        pusher,
-    ) -> None:
-        """Push the cumulative-€ series with spike-immune merge semantics.
-
-        ``items`` is ``[(ts_utc, cumulative_eur), ...]``, already
-        monotonic by construction (output of
-        :func:`compute_hourly_cost_stream`).
-
-        ``pusher`` is either :func:`async_add_external_statistics` (for
-        ``source != "recorder"`` external sources) or
-        :func:`async_import_statistics` (for ``source == "recorder"``
-        entity sources). Identical signatures — fire-and-forget.
-
-        ## Strategy (mirrors the consumption push)
-
-        1. **Cumulative → delta.** ``compute_hourly_cost_stream``
-           emits a running total; :func:`merge_forward_and_backfill`
-           consumes deltas. :func:`cumulative_to_deltas` is the
-           inverse.
-        2. **Cold start (no prior stats).** Push the cumulative
-           series as-is — the cost stream is monotonic so
-           ``state=cum, sum=cum`` is a valid LTS write that the
-           Energy panel renders correctly. Cheaper than a full
-           replay on the very first push.
-        3. **Have prior stats.** Read the existing recorder series,
-           merge the new deltas with the old (new wins on
-           timestamp collision), replay from zero, push the whole
-           merged series.
-
-        ## Why always replay (after the first push)
-
-        The cost stream covers from the **earliest cached reading**
-        on every coordinator tick — not just the new hours. So
-        ``items[0].ts`` is almost always ``<= last_start`` after the
-        first push. A rolling-forward filter would silently drop
-        every row. Always-replay is the only correct mode.
-
-        ## Why this fixes the v0.5.2 bugs
-
-        Pre-v0.5.4, the Energy panel rendered:
-
-        - ``0 €`` for periods predating the cost-feature toggle
-          (HA's auto-generated stats only started at toggle time;
-          the explicit push only covered what the cache held).
-        - **Negative bars** at the seam between auto-generated and
-          explicitly-pushed values (different baselines, same
-          ``statistic_id``).
-
-        v0.5.4 first runs a one-shot migration in ``__init__.py``
-        that drops the conflicting series, then this push rebuilds
-        them as a single zero-anchored monotonic series. Subsequent
-        pushes always replay-from-zero so any future inconsistency
-        self-heals on the next coordinator tick.
-        """
-        statistic_id = metadata["statistic_id"]
-
-        # 1) Cumulative € → per-hour delta.
-        deltas = cumulative_to_deltas(items)
-
-        # 2) Read the most recent stored stat to decide cold-start vs replay.
-        recorder = get_recorder_instance(self.hass)
-        last_stats = await recorder.async_add_executor_job(
-            get_last_statistics,
-            self.hass,
-            1,
-            statistic_id,
-            True,
-            {"sum"},
-        )
-        last_start: datetime | None = None
-        if last_stats and statistic_id in last_stats and last_stats[statistic_id]:
-            entry = last_stats[statistic_id][0]
-            raw_start = entry.get("start") or entry.get("end")
-            if isinstance(raw_start, (int, float)):
-                last_start = dt_util.utc_from_timestamp(float(raw_start))
-            elif raw_start is not None:
-                last_start = dt_util.parse_datetime(str(raw_start))
-
-        # 3a) Cold start — no prior stats. The cumulative series is
-        # already monotonic, push it as `state=cum, sum=cum` directly.
-        if last_start is None:
-            if not items:
-                return
-            stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in items]
-            _LOGGER.info(
-                "%s: cold start — importing %d hourly cost stats",
-                statistic_id,
-                len(stats),
-            )
-            pusher(self.hass, metadata, stats)
-            return
-
-        # 3b) Have prior stats — read them, merge with new deltas,
-        # replay from zero, upsert the whole thing.
-        if not deltas:
-            return
-        earliest_new = min(ts for ts, _ in deltas)
-        # Pad an hour back so the row immediately before the earliest
-        # new item is included in the replay (mirrors the consumption
-        # backfill — keeps the replay seamlessly continuous).
-        query_from = earliest_new - timedelta(hours=1)
-        existing_raw = await recorder.async_add_executor_job(
-            statistics_during_period,
-            self.hass,
-            query_from,
-            None,  # end_time: up to now
-            {statistic_id},
-            "hour",
-            None,  # default units
-            {"sum"},
-        )
-        existing_rows: list[tuple[datetime, float]] = []
-        for row in (existing_raw or {}).get(statistic_id, []):
-            raw_start = row.get("start") or row.get("end")
-            if raw_start is None:
-                continue
-            if isinstance(raw_start, (int, float)):
-                ts = dt_util.utc_from_timestamp(float(raw_start))
-            else:
-                ts = dt_util.parse_datetime(str(raw_start))
-                if ts is None:
-                    continue
-            running = row.get("sum")
-            if running is None:
-                continue
-            existing_rows.append((ts, float(running)))
-
-        merged = merge_forward_and_backfill(deltas, existing_rows)
-        if not merged:
-            _LOGGER.debug(
-                "%s: merge produced empty series — skipping push",
-                statistic_id,
-            )
-            return
-
-        stats = [StatisticData(start=ts, state=v, sum=v) for ts, v in merged]
-        _LOGGER.debug(
-            "%s: replaying %d hourly cost stats (merged %d new with %d existing)",
-            statistic_id,
-            len(stats),
-            len(deltas),
-            len(existing_rows),
-        )
-        pusher(self.hass, metadata, stats)
-
-
-class CanalCurrentPriceSensor(_ContractSensor, _CostSensorMixin):
-    """€/m³ that the *next* m³ would cost — sum of all four services'
-    block prices for the current bimonth's block, plus IVA + the
-    suplementaria.
-
-    Useful for templates ("how much does running the dishwasher
-    cost?") and for the Energy panel's "Use a price entity" mode if
-    the user prefers a live €/m³ rate over total-cost statistics.
-
-    The block changes when consumption crosses each prorated threshold
-    within a bimonth, which is why this sensor is stateless w.r.t.
-    history — it always reflects the price for the *next* m³ given
-    the cache's current bimonth-to-date total.
-
-    No ``device_class`` here even though the unit involves currency:
-    HA's monetary device class is for *amounts of money* (with strict
-    state-class compatibility — ``TOTAL`` only). This sensor reports a
-    *rate* (€/m³), not an amount, so MONETARY would mis-describe the
-    semantics and force a state class incompatible with the
-    instantaneous-measurement nature of the value. Leaving
-    ``device_class`` unset keeps the unit string visible (`EUR/m³`)
-    and lets us use ``MEASUREMENT`` honestly.
-    """
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:cash-clock"
-    _attr_translation_key = "current_price"
-    _attr_suggested_display_precision = 4
-
-    def __init__(
-        self,
-        coordinator: CanalCoordinator,
-        entry: ConfigEntry,
-        install_name: str,
-        contract_id: str,
-        params: TariffParams,
-        currency: str,
-    ) -> None:
-        super().__init__(coordinator, entry, install_name, contract_id)
-        self._params = params
-        # HA doesn't have a currency/m³ enum — concatenate so the UI
-        # shows e.g. "EUR/m³". Some unit converters may complain; we
-        # accept that in exchange for an obvious unit string.
-        self._attr_native_unit_of_measurement = f"{currency}/m³"
-        self._attr_name = "Canal Precio actual"
-        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_price"
-
-    @property
-    def native_value(self) -> float | None:
-        now = dt_util.now()
-        try:
-            ts = vigencia_for(now.date())
-        except ValueError:
-            return None
-        consumo_m3 = self._bimonth_consumo_m3()
-        b_start, b_end = bimonth_for(now.date())
-        dp_days = (b_end - b_start).days
-        # Price the very next 1 m³ to figure out the marginal block
-        # price. Cheaper than reverse-engineering split_into_blocks.
-        before = variable_cost_eur(consumo_m3, dp_days, ts)
-        after = variable_cost_eur(consumo_m3 + 1.0, dp_days, ts)
-        marginal = after - before  # € for that extra m³ pre-IVA-pre-supl
-        with_supl = marginal + self._params.cuota_supl_alc_eur_m3
-        with_iva = with_supl * (1.0 + self._params.iva_pct / 100.0)
-        return round(with_iva, 4)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "contract": self._contract_id,
-            "bimonth_consumo_m3": round(self._bimonth_consumo_m3(), 3),
-        }
-
-
-class CanalCurrentBlockSensor(_ContractSensor, _CostSensorMixin):
-    """Which of Canal's four tariff blocks the *next* m³ would land in.
-
-    State is an int 1..4. Goes hand-in-hand with the price sensor —
-    when this rolls from 1 to 2, the price entity jumps to the B2 rate.
-
-    Block thresholds are prorated by the bimonth's actual length (60
-    days for a calendar bimonth, but :func:`block_thresholds` accepts
-    any DP if the user is on a shifted cycle in the future).
-    """
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:format-list-numbered"
-    _attr_translation_key = "current_block"
-    # Override the L unit inherited from _ContractSensor — block is a
-    # dimensionless integer from 1 to 4.
-    _attr_native_unit_of_measurement = None
-
-    def __init__(
-        self,
-        coordinator: CanalCoordinator,
-        entry: ConfigEntry,
-        install_name: str,
-        contract_id: str,
-        params: TariffParams,
-    ) -> None:
-        super().__init__(coordinator, entry, install_name, contract_id)
-        self._params = params
-        self._attr_name = "Canal Bloque tarifario actual"
-        self._attr_unique_id = f"canal_isabel_ii_{contract_id}_current_block"
-
-    @property
-    def native_value(self) -> int | None:
-        now = dt_util.now()
-        b_start, b_end = bimonth_for(now.date())
-        dp_days = (b_end - b_start).days
-        consumo_m3 = self._bimonth_consumo_m3()
-        u1, u2, u3 = block_thresholds(dp_days)
-        if consumo_m3 < u1:
-            return 1
-        if consumo_m3 < u2:
-            return 2
-        if consumo_m3 < u3:
-            return 3
-        return 4
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        now = dt_util.now()
-        b_start, b_end = bimonth_for(now.date())
-        dp_days = (b_end - b_start).days
-        u1, u2, u3 = block_thresholds(dp_days)
-        consumo_m3 = self._bimonth_consumo_m3()
-        b1, b2, b3, b4 = split_into_blocks(consumo_m3, dp_days)
-        return {
-            "contract": self._contract_id,
-            "bimonth_consumo_m3": round(consumo_m3, 3),
-            "block_1_threshold_m3": round(u1, 3),
-            "block_2_threshold_m3": round(u2, 3),
-            "block_3_threshold_m3": round(u3, 3),
-            "consumed_in_block_1_m3": round(b1, 3),
-            "consumed_in_block_2_m3": round(b2, 3),
-            "consumed_in_block_3_m3": round(b3, 3),
-            "consumed_in_block_4_m3": round(b4, 3),
-            "bimonth_start": b_start.isoformat(),
-            "bimonth_end": b_end.isoformat(),
-        }

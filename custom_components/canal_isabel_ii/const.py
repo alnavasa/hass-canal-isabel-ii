@@ -72,11 +72,13 @@ CONF_CUOTA_SUPL_ALC = "cuota_supl_alc_eur_m3"
 #: integration release.
 CONF_IVA_PCT = "iva_pct"
 
-#: One-shot migration flag set on first boot under v0.5.4. When False
-#: (or missing — pre-v0.5.4 entries don't have it), :func:`async_setup_entry`
-#: clears any previously-stored cost statistics so the new spike-immune
-#: push path can rebuild them from a clean, monotonic series. See the
-#: long-form rationale in ``__init__.py:_migrate_cost_stats_v054``.
+#: One-shot migration flag set on first boot under v0.5.4. v0.6.0 no
+#: longer reads it (cost is decoupled from any entity state, so there
+#: is nothing to recover from a stale cumulative). The constant is
+#: kept defined so an `entry.data` dict that still carries the flag
+#: from a v0.5.x install round-trips cleanly through HA's storage —
+#: removing the constant would not break behaviour but could cause
+#: noise from forward-compatibility code that walks data keys.
 CONF_COST_STATS_MIGRATED = "cost_stats_v054_migrated"
 
 
@@ -174,27 +176,12 @@ MAX_READINGS_PER_ENTRY = 8760
 #: long-term external statistics are NOT touched: those preserve
 #: history and the next push anchors to ``last_sum`` so the Energy
 #: panel keeps a continuous curve across the meter swap.
+#:
+#: v0.6.0 dropped the cost entity entirely (cost is now a pure
+#: long-term statistic published from ``cost_publisher.py``), so the
+#: companion ``SIGNAL_CLEAR_COST_STATS`` that used to wake the cost
+#: sensor's in-memory guard is gone. ``reset_meter`` now signals only
+#: the two consumption-side entities and the meter-reading entity; the
+#: cost stat continues forward via the publisher's ``last_sum`` anchor
+#: on the next POST.
 SIGNAL_METER_RESET = "canal_isabel_ii_meter_reset_{entry_id}_{contract_id}"
-
-#: Dispatcher signal fired by the ``clear_cost_stats`` service after
-#: ``recorder.async_clear_statistics`` has cleared the cost
-#: ``statistic_id`` for a contract. Format with ``entry_id`` and
-#: ``contract_id`` so multi-contract entries can be cleared
-#: independently:
-#:
-#:     SIGNAL_CLEAR_COST_STATS.format(entry_id=eid, contract_id=cid)
-#:
-#: ``CanalCumulativeCostSensor`` subscribes to this signal in
-#: ``async_added_to_hass`` and resets its in-memory
-#: ``_restored_value`` to ``None``. Without this, v0.5.21's symmetric
-#: regression guard (which protects both ``native_value`` and the
-#: recorder push) would keep returning the stale restored value
-#: forever after a cache shrink: the recorder is empty after the
-#: clear, but the entity still reports the pre-clear high, the guard
-#: still sees a regression and skips every subsequent push, and the
-#: Energy panel renders 0 € for the cost column indefinitely. Firing
-#: this signal closes the loop — the next coordinator tick recomputes
-#: ``native_value`` against ``_restored_value=None`` (no guard
-#: applies), the push goes through cold-start, and the panel
-#: rehydrates within minutes.
-SIGNAL_CLEAR_COST_STATS = "canal_isabel_ii_clear_cost_stats_{entry_id}_{contract_id}"

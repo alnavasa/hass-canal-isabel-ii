@@ -42,7 +42,6 @@ continuation_stats = _helpers.continuation_stats
 needs_backfill = _helpers.needs_backfill
 merge_forward_and_backfill = _helpers.merge_forward_and_backfill
 cumulative_to_deltas = _helpers.cumulative_to_deltas
-is_cost_stream_regression = _helpers.is_cost_stream_regression
 
 
 # Same conftest.py override trick as in test_meter_summary_parser.py:
@@ -920,87 +919,16 @@ class TestCostPushPipelineMonotonicity:
 
 
 # ---------------------------------------------------------------------
-# is_cost_stream_regression — symmetric guard for state + push paths
+# v0.6.0 note — ``is_cost_stream_regression`` removed
 # ---------------------------------------------------------------------
 #
-# This predicate is the v0.5.21 fix for the recurring negative-bar bug
-# in the Energy panel. Pre-v0.5.21, only ``CanalCumulativeCostSensor.
-# native_value`` had the regression guard; ``_push_cost_statistics_locked``
-# did not. The asymmetry meant the entity state would hold at the old
-# (higher) value while the recorder push wrote the new (lower) series,
-# producing a seam in the long-term statistics that the Energy panel
-# rendered as a large negative bar (~ -38 € for MF1 in v0.5.20).
-#
-# Centralising the predicate in ``statistics_helpers.is_cost_stream_regression``
-# and calling it from both paths eliminates the divergence by
-# construction. These tests pin the predicate's exact contract: any
-# future "let's just compare directly" inlining or threshold tweak
-# must keep both sides in lockstep, and the tests fire if not.
-
-
-def test_regression_returns_false_when_restored_is_none():
-    """Fresh install (no prior state) — never a regression so the
-    cold-start push proceeds unconditionally."""
-    assert is_cost_stream_regression(latest=0.0, restored=None) is False
-    assert is_cost_stream_regression(latest=42.0, restored=None) is False
-
-
-def test_regression_returns_false_when_latest_equals_restored():
-    """Idempotent recompute (same input → same output) is not a
-    regression — push proceeds and re-asserts the same values to the
-    recorder. Cheap upsert; keeps merge logic calibrated."""
-    assert is_cost_stream_regression(latest=27.42, restored=27.42) is False
-
-
-def test_regression_returns_false_when_latest_just_below_restored():
-    """Within the 1-cent default threshold — floating-point noise from
-    period-by-period recomputation must not flag as a regression.
-    Without this tolerance the sensor would freeze on imperceptible
-    sub-cent diffs (e.g. tariff segment splits at vigencia boundaries
-    rounding differently when liters change by 1 mL between runs)."""
-    # 0.005 € below — well inside the 0.01 € threshold.
-    assert is_cost_stream_regression(latest=27.415, restored=27.42) is False
-    # Right at the threshold edge — also not a regression (strict <).
-    assert is_cost_stream_regression(latest=27.41, restored=27.42) is False
-
-
-def test_regression_returns_true_when_latest_meaningfully_below():
-    """Real regressions (cents to euros) are flagged so both the
-    state-side and push-side guards skip and preserve the previous
-    value. The MF1 v0.5.20 incident was a 38.70 € drop — the predicate
-    must catch that without ambiguity."""
-    # The MF1 v0.5.20 incident magnitude.
-    assert is_cost_stream_regression(latest=111.84, restored=150.54) is True
-    # A small but unambiguous regression (10 cents).
-    assert is_cost_stream_regression(latest=27.32, restored=27.42) is True
-
-
-def test_regression_threshold_can_be_overridden():
-    """The default 1-cent threshold absorbs FP noise but is exposed
-    as a parameter so a future caller (or test harness) can tighten
-    or loosen it without forking the helper. Below default → flagged
-    earlier; above default → flagged later."""
-    # Tighter threshold (1 millicent) — even sub-cent diffs trip it.
-    assert is_cost_stream_regression(latest=27.415, restored=27.42, threshold=0.0001) is True
-    # Looser threshold (1 €) — only big drops trip it.
-    assert is_cost_stream_regression(latest=27.0, restored=27.42, threshold=1.0) is False
-
-
-def test_regression_returns_false_when_latest_above_restored():
-    """Stream growing forward (the normal case) — never a regression."""
-    assert is_cost_stream_regression(latest=27.50, restored=27.42) is False
-    assert is_cost_stream_regression(latest=151.00, restored=150.54) is False
-
-
-def test_regression_handles_zero_restored():
-    """A restored value of exactly 0.0 is a legitimate state (the
-    cumulative cost was zero at restore time, e.g. fresh boot of the
-    very first bimonth). Anything < -threshold below it would flag,
-    but cum_eur is non-negative by construction so the practical case
-    is ``latest >= 0`` → never a regression. Pin the contract anyway."""
-    assert is_cost_stream_regression(latest=0.0, restored=0.0) is False
-    assert is_cost_stream_regression(latest=0.05, restored=0.0) is False
-    # Pathological: a negative latest below threshold WOULD trip — but
-    # ``compute_hourly_cost_stream`` guarantees non-negative cum_eur,
-    # so this is a contract test for the predicate, not a real path.
-    assert is_cost_stream_regression(latest=-0.5, restored=0.0) is True
+# The predicate (and its 7 tests that lived here) existed only to keep
+# ``CanalCumulativeCostSensor.native_value`` in lockstep with the
+# recorder push, because the entity owned mutable cost state. v0.6.0
+# deletes the cost entity entirely: cost is now a long-term statistic
+# published from ``cost_publisher.py`` via the replay-from-zero merge
+# below, which is monotonic by construction. With the entity gone there
+# is nothing to "guard" — any divergence the predicate used to catch
+# can no longer happen because there is no second writer to diverge
+# against. The merge tests in ``TestCostPushPipelineMonotonicity``
+# above still pin the publisher's correctness end-to-end.

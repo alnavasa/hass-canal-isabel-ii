@@ -56,7 +56,6 @@ from .bookmarklet import (
 )
 from .bookmarklet_view import CanalBookmarkletPageView
 from .const import (
-    CONF_COST_STATS_MIGRATED,
     CONF_CUOTA_SUPL_ALC,
     CONF_DIAMETRO_MM,
     CONF_ENABLE_COST,
@@ -70,11 +69,11 @@ from .const import (
     DEFAULT_IVA_PCT,
     DEFAULT_N_VIVIENDAS,
     DOMAIN,
-    SIGNAL_CLEAR_COST_STATS,
     SIGNAL_METER_RESET,
     STATISTICS_SOURCE,
 )
 from .coordinator import CanalCoordinator
+from .cost_publisher import publish_cost_stream
 from .ingest import CanalIngestView
 from .store import ReadingStore
 
@@ -223,10 +222,9 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
                 if not isinstance(entry_data, dict):
                     continue
                 store: ReadingStore | None = entry_data.get("store")
-                coord: CanalCoordinator | None = entry_data.get("coordinator")
-                name = (entry_data.get("name") or "").lower()
-                if store is None or coord is None:
+                if store is None:
                     continue
+                name = (entry_data.get("name") or "").lower()
                 if wanted and wanted not in {entry_id.lower(), name}:
                     continue
                 config_entry = hass.config_entries.async_get_entry(entry_id)
@@ -234,10 +232,24 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
                     continue
                 _LOGGER.info("[%s] Service clear_cost_stats requested", entry_id)
                 await _clear_cost_stats_for_entry(hass, config_entry, store)
-                # Re-publish from a clean slate. The cost sensor's
-                # ``_handle_coordinator_update`` rebuilds the full
-                # monotonic series via the spike-immune push.
-                await coord.async_request_refresh()
+                # v0.6.0: re-publish the cost stat from a clean slate
+                # so the Energy panel doesn't show a gap until the
+                # next bookmarklet POST. Skipped if the cost feature
+                # is disabled (the publisher would no-op anyway). The
+                # publisher takes a fresh ``get_last_statistics`` and
+                # cold-starts because we just cleared the recorder.
+                cost_settings = entry_data.get("cost") or {}
+                contract_id = (config_entry.data.get("contract") or "").strip()
+                install_name = entry_data.get("name") or ""
+                if cost_settings.get(CONF_ENABLE_COST) and contract_id and store.readings:
+                    await publish_cost_stream(
+                        hass,
+                        entry_id,
+                        contract_id,
+                        install_name,
+                        cost_settings,
+                        store.readings,
+                    )
 
         hass.services.async_register(
             DOMAIN,
@@ -320,25 +332,41 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Per-entry boot: restore store, build coordinator, fan out platforms."""
+    """Per-entry boot: restore store, build coordinator, fan out platforms.
+
+    v0.6.0 boot path:
+
+    1. Load the on-disk store.
+    2. **Purge any v0.5.x cost entities** still in the entity registry —
+       v0.6.0 stops materialising them, so without this step they would
+       remain registered forever in an "unavailable" state and clutter
+       the UI / dashboards. The long-term statistic
+       ``canal_isabel_ii:cost_<contract>`` is **not** touched: history
+       survives the upgrade and the user only needs to re-pick the
+       external statistic in the Energy panel if they had previously
+       picked the entity. See ``docs/v0.6.0-redesign.md`` for the
+       migration rationale.
+    3. Build the coordinator, expose the cached settings, register
+       the per-entry ingest lock.
+    4. Forward to the sensor platform (only consumption sensors get
+       created).
+    5. Publish the bookmarklet install notification when no contract
+       has been bound yet.
+    6. **Re-publish the cost stat once at boot** if cost is enabled
+       and the store already holds readings — this rewrites the
+       statistic with v0.6.0's clean replay-from-zero so users
+       upgrading from v0.5.x get a corrected curve immediately
+       instead of waiting for the next bookmarklet click.
+    """
     store = ReadingStore(hass, entry.entry_id)
     await store.async_load()
 
-    # v0.5.4 one-shot migration. Pre-v0.5.4 entries had cost stats that
-    # mixed HA's auto-generated values (from ``state_class=total_increasing``)
-    # with the explicit push added in v0.5.2 — leaving non-monotonic
-    # series that the Energy panel renders as 0 € for old periods or
-    # huge negative bars where the two paths diverged. We clear those
-    # stats once so the new spike-immune push (see
-    # ``CanalCumulativeCostSensor._submit_running_stats``) can rebuild
-    # them from a clean slate. Idempotent via the ``CONF_COST_STATS_MIGRATED``
-    # flag — runs at most once per entry.
-    if not entry.data.get(CONF_COST_STATS_MIGRATED):
-        await _migrate_cost_stats_v054(hass, entry, store)
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, CONF_COST_STATS_MIGRATED: True},
-        )
+    # v0.6.0 migration — purge obsolete cost entities. Idempotent:
+    # subsequent boots find the registry already clean and the call
+    # is a fast no-op. Kept on every boot rather than gated by a flag
+    # to keep the migration self-healing if the user manually
+    # restores a backup that contains the old entities.
+    _purge_obsolete_cost_entities_v060(hass, entry, store)
 
     coordinator = CanalCoordinator(hass, entry, store)
     # First refresh just publishes what's already in the store; never
@@ -347,20 +375,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # legitimate state until the user clicks the bookmarklet.
     await coordinator.async_refresh()
 
+    cost_settings = _resolve_cost_settings(entry)
+    install_name = entry.data.get(CONF_NAME) or entry.title or ""
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         "store": store,
         "coordinator": coordinator,
-        "name": entry.data.get(CONF_NAME) or entry.title or "",
+        "name": install_name,
         # Token consulted by ``CanalIngestView`` on every POST. Cached
         # here so the view doesn't have to scan ``hass.config_entries``
         # on every request.
         "token": entry.data.get("token", ""),
-        # Cost-feature merged settings (data ⊕ options) so sensor.py
-        # can read them without re-doing the merge on every refresh.
-        # OptionsFlow writes to ``entry.options``; the wizard wrote to
-        # ``entry.data``. Options win when both are present.
-        "cost": _resolve_cost_settings(entry),
+        # Cost-feature merged settings (data ⊕ options). The ingest
+        # endpoint reads this dict on every POST and forwards it to
+        # ``cost_publisher.publish_cost_stream``. OptionsFlow writes
+        # to ``entry.options``; the wizard wrote to ``entry.data``.
+        # Options win when both are present.
+        "cost": cost_settings,
         # Per-entry asyncio.Lock serializing the read-modify-write
         # section of the ingest view. Two POSTs hitting the same
         # entry simultaneously would otherwise both pass the
@@ -388,72 +420,107 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not entry.data.get("contract"):
         await _publish_bookmarklet_notification(hass, entry)
 
+    # v0.6.0: re-publish the cost statistic at boot if there's data to
+    # publish. After an upgrade from v0.5.x this rewrites the stale
+    # series with the clean replay-from-zero merge, so users see a
+    # correct Energy panel without having to wait for the next POST.
+    # Fire-and-forget — failures are logged inside the publisher and
+    # never abort setup.
+    contract_id = (entry.data.get("contract") or "").strip()
+    if cost_settings.get(CONF_ENABLE_COST) and contract_id and store.readings:
+        hass.async_create_task(
+            publish_cost_stream(
+                hass,
+                entry.entry_id,
+                contract_id,
+                install_name,
+                cost_settings,
+                store.readings,
+            ),
+            name=f"canal_isabel_ii v0.6.0 boot cost republish {entry.entry_id}",
+        )
+
     return True
+
+
+def _purge_obsolete_cost_entities_v060(
+    hass: HomeAssistant, entry: ConfigEntry, store: ReadingStore
+) -> None:
+    """Remove the v0.5.x cost entities from the entity registry.
+
+    v0.6.0 stops creating ``_cumulative_cost`` / ``_current_price`` /
+    ``_current_block`` entities. Existing installs upgraded from
+    v0.5.x have these in the registry; without an explicit removal
+    they'd remain forever in an "unavailable" state, polluting the
+    device page and breaking any dashboard card that referenced them
+    by entity id (the user would see "Entity not available" instead
+    of just an empty space).
+
+    Idempotent: looks each one up by stable unique_id and skips silently
+    when the entity isn't present. Recorder history stays intact — this
+    only removes the entity_registry entry, not the underlying stats.
+
+    The long-term statistic ``canal_isabel_ii:cost_<contract>`` is
+    **not** touched. The publisher (called from the ingest endpoint
+    and from boot) keeps writing to it; users who had picked it in
+    the Energy panel see no interruption.
+    """
+    contracts = sorted({r.contract for r in store.readings if r.contract})
+    if not contracts:
+        return
+
+    ent_reg = er.async_get(hass)
+    suffixes = ("cumulative_cost", "current_price", "current_block")
+    removed: list[str] = []
+    for contract_id in contracts:
+        for suffix in suffixes:
+            unique_id = f"canal_isabel_ii_{contract_id}_{suffix}"
+            entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
+            if entity_id:
+                ent_reg.async_remove(entity_id)
+                removed.append(entity_id)
+
+    if removed:
+        _LOGGER.info(
+            "[%s] v0.6.0 migration: removed %d obsolete cost entities (%s). "
+            "Cost is now published as the long-term statistic only — pick "
+            "'<install> - Canal de Isabel II coste' in the Energy panel "
+            "if you previously had the entity selected.",
+            entry.entry_id,
+            len(removed),
+            ", ".join(removed),
+        )
 
 
 async def _clear_cost_stats_for_entry(
     hass: HomeAssistant, entry: ConfigEntry, store: ReadingStore
 ) -> None:
-    """Clear all long-term cost statistics for this entry.
+    """Clear the long-term cost statistic for every contract in this entry.
 
-    Drops two statistic ids per contract:
+    v0.6.0 simplification: the cost feature lives only as the external
+    statistic ``canal_isabel_ii:cost_<contract>``. There is no entity
+    that mirrors it (the v0.5.x ``CanalCumulativeCostSensor`` was
+    removed in v0.6.0; the entity is purged from the registry by
+    :func:`_purge_obsolete_cost_entities_v060` at boot). So clearing
+    the cost data reduces to a single recorder call per contract.
 
-    1. ``canal_isabel_ii:cost_<contract>`` — external statistic
-       written by the spike-immune push in
-       ``CanalCumulativeCostSensor._submit_running_stats``.
-    2. ``sensor.<…>_coste_acumulado`` — entity-side statistic
-       auto-generated by HA's recorder (``state_class=total``).
-       Looked up via the entity registry by unique_id so a user
-       rename of the entity doesn't break the cleanup.
+    Used by:
 
-    Used in two places:
-
-    * ``_migrate_cost_stats_v054`` — one-shot at first boot of v0.5.4,
-      gated by ``CONF_COST_STATS_MIGRATED``. Cleans up the
-      stuck-on-zero / huge-negative-bar mess left by pre-v0.5.4
-      auto-stats colliding with the v0.5.2 explicit push.
-    * The new ``clear_cost_stats`` service (v0.5.15) — manual
-      recovery for users who report negative cost bars in the Energy
-      panel anyway. Same code path; just exposes the eraser button.
-
-    After the recorder applies the clear, the next coordinator tick
-    runs the cost sensor's update which pushes a from-scratch
-    monotonic series via the spike-immune path. The Energy panel
-    backfills automatically once the new stats land.
+    * The ``canal_isabel_ii.clear_cost_stats`` service — manual
+      recovery if a user ever reports stale data in the Energy
+      panel. The next bookmarklet POST repopulates the series from
+      scratch via :func:`cost_publisher.publish_cost_stream`.
 
     ``async_clear_statistics`` is a callback that queues a recorder
     task — fire-and-forget. We don't await an acknowledgement; the
-    push that follows the next ``async_request_refresh`` will see the
-    cleared series.
+    next POST's publisher takes a fresh ``get_last_statistics``
+    snapshot and either cold-starts or replays as appropriate.
     """
     contracts = sorted({r.contract for r in store.readings if r.contract})
     if not contracts:
-        # Brand-new entry (no bookmarklet POST yet) or genuinely
-        # contract-less — nothing to clear. Caller still flips its
-        # idempotency flag so we don't keep re-scanning on every boot.
         return
 
-    stat_ids: list[str] = []
-
-    # External statistic ids — deterministic from the contract id.
-    for contract in contracts:
-        stat_ids.append(f"{STATISTICS_SOURCE}:cost_{contract}")
-
-    # Entity statistic ids — resolve via the entity registry by the
-    # unique_id the cost sensor stamps on itself in
-    # ``CanalCumulativeCostSensor.__init__``. If the user renamed the
-    # entity, this still finds it; if the entity was never created
-    # (cost feature never enabled) we get None and skip cleanly.
-    ent_reg = er.async_get(hass)
-    for contract in contracts:
-        unique_id = f"canal_isabel_ii_{contract}_cumulative_cost"
-        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
-        if entity_id:
-            stat_ids.append(entity_id)
-
-    if not stat_ids:
-        return
-
+    stat_ids = [f"{STATISTICS_SOURCE}:cost_{contract}" for contract in contracts]
     _LOGGER.info(
         "[%s] Clearing %d cost statistic_ids: %s",
         entry.entry_id,
@@ -462,70 +529,6 @@ async def _clear_cost_stats_for_entry(
     )
     recorder = get_recorder_instance(hass)
     recorder.async_clear_statistics(stat_ids)
-
-    # v0.5.22: notify the live cost sensors so they drop their
-    # in-memory ``_restored_value``. Without this, v0.5.21's symmetric
-    # regression guard would freeze the entity on the pre-clear high
-    # forever — the recorder is empty after the wipe but the entity
-    # keeps reporting the old value, the guard sees a regression
-    # against that stale anchor on every tick, the push is skipped
-    # and the Energy panel reads 0 € indefinitely. Firing the signal
-    # AFTER ``async_clear_statistics`` (queued on the recorder) is
-    # safe: the next coordinator tick will recompute against
-    # ``_restored_value=None`` and push from cold-start; the recorder
-    # will have applied the clear by then or will apply the new push
-    # idempotently — either way the series ends monotonic.
-    for contract in contracts:
-        async_dispatcher_send(
-            hass,
-            SIGNAL_CLEAR_COST_STATS.format(entry_id=entry.entry_id, contract_id=contract),
-        )
-
-
-async def _migrate_cost_stats_v054(
-    hass: HomeAssistant, entry: ConfigEntry, store: ReadingStore
-) -> None:
-    """One-shot v0.5.4 migration: clear stale cost statistics for this entry.
-
-    ## Why
-
-    ``sensor.<…>_coste_acumulado`` was declared
-    ``state_class = TOTAL_INCREASING`` so HA's recorder auto-generated
-    long-term statistics for it from the entity's state stream. That
-    auto-generation began **the moment the cost feature was first
-    enabled**, with whatever ``native_value`` the sensor had at that
-    instant — which only reflects what's in ``coordinator.data`` (a
-    rolling window capped by ``MAX_READINGS_PER_ENTRY``).
-
-    v0.5.2 added a parallel ``async_import_statistics`` push to the
-    same ``statistic_id``. Both writers are upserts by
-    ``(statistic_id, start)``, but they only overlap on the hours our
-    push covers — every hour outside that window kept the
-    auto-generated ``sum``. Result: a series with two regimes glued
-    together, frequently non-monotonic at the seam.
-
-    The Energy panel renders each bar as ``sum[n] - sum[n-1]``, so a
-    drop at the seam becomes a large negative bar (sometimes hundreds
-    of euros), and a series that auto-gen never reached becomes 0 €
-    for the entire historical period before the cost-feature toggle.
-
-    ## What we do
-
-    Delegate to :func:`_clear_cost_stats_for_entry`, which drops both
-    the external and entity statistic ids for every contract in this
-    entry. The next coordinator tick rebuilds the series from a clean
-    slate via the spike-immune push.
-
-    ## Idempotency
-
-    Caller sets ``entry.data[CONF_COST_STATS_MIGRATED] = True`` after
-    we return, so a restart never re-clears. A user who deliberately
-    wants to re-trigger the migration can either flip that flag in
-    ``.storage/core.config_entries`` and reboot, OR — preferred since
-    v0.5.15 — call the ``canal_isabel_ii.clear_cost_stats`` service,
-    which uses the same code path without touching storage files.
-    """
-    await _clear_cost_stats_for_entry(hass, entry, store)
 
 
 def _resolve_cost_settings(entry: ConfigEntry) -> dict[str, Any]:

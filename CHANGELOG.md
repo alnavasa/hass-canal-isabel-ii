@@ -3,6 +3,131 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.6.0] — 2026-04-26
+
+### Cambiado — rediseño: el coste deja de ser una entidad y pasa a ser SOLO una estadística
+
+Tras tres versiones consecutivas (v0.5.20 → 21 → 22 → 23) parcheando
+síntomas distintos del mismo bug — barra negativa en el panel Energía
+(coste), congelación de la entidad tras `clear_cost_stats`,
+`RuntimeError` en handlers del dispatcher — el patrón quedó claro:
+**el problema era estructural**, no implementacional. El coste vivía
+como entidad (`CanalCumulativeCostSensor`) que mantenía estado mutable
+en memoria (`_restored_value`) Y al mismo tiempo publicaba la
+estadística externa de largo plazo. Cualquier desfase entre el estado
+in-memory y la serie del recorder (cache trim, vigencia editada,
+backfill manual, reinicio de HA) producía una "costura" que el panel
+Energía renderizaba como barra negativa.
+
+La observación que rompe el nudo: el portal de Canal de Isabel II
+publica las lecturas horarias **con un mínimo de 12 h de retraso**.
+"Coste vivo en este segundo" nunca fue real. Recalcular el stream
+completo en cada tick del coordinator era trabajo desperdiciado Y la
+fuente de cada bug de divergencia.
+
+#### El rediseño v0.6.0
+
+- **El coste se publica una vez por POST**, desde un módulo nuevo
+  `cost_publisher.py`. La estadística externa
+  `canal_isabel_ii:cost_<contract>` sigue siendo la misma (los
+  paneles Energía existentes que la apuntaban siguen funcionando).
+- **No hay entidad espejo**. La entidad acumulativa
+  (`CanalCumulativeCostSensor`), la entidad de precio actual
+  (`CanalCurrentPriceSensor`) y la de bloque tarifario actual
+  (`CanalCurrentBlockSensor`) **se eliminan** junto al mixin
+  compartido (`_CostSensorMixin`).
+- **Sin estado in-memory** entre llamadas. El publisher lee el
+  recorder, mergea con el stream nuevo y publica. El recorder es la
+  única fuente de verdad. El bug de divergencia no puede volver
+  porque no hay segundo escritor.
+- **Algoritmo monotónico por construcción**: `merge_forward_and_backfill`
+  reconstruye la suma desde cero sobre la serie mergeada, así que
+  cualquier serie publicada es no-decreciente. El panel Energía no
+  puede renderizar barras negativas porque las diferencias `sum[n] -
+  sum[n-1]` son ≥ 0 siempre.
+
+#### Migración
+
+Al primer arranque tras actualizar:
+
+- El módulo `__init__._purge_obsolete_cost_entities_v060` borra
+  automáticamente del registro de entidades los tres sensores de
+  coste por su `unique_id`. Idempotente — sobrevive a reinicios.
+- La estadística externa `canal_isabel_ii:cost_<contract>` se
+  **conserva intacta** en el recorder. La historia de coste anterior
+  no se pierde.
+- Si el panel Energía tenía elegida la entidad
+  `sensor.<install>_coste_acumulado` como fuente de coste de agua,
+  esa elección desaparece automáticamente (la entidad ya no existe).
+  El usuario debe abrir Configuración → Paneles → Energía → Agua y
+  re-seleccionar la **estadística externa** "&lt;install&gt; - Canal de
+  Isabel II coste". Es un paso manual de un solo clic; no se puede
+  evitar porque HA enlaza el panel a un id de entidad o a un id de
+  estadística (no hay redirección automática entre ambos).
+- En el primer arranque tras actualizar, el publisher se ejecuta
+  inmediatamente con las lecturas en cache (sin esperar al primer
+  POST), así que la estadística refleja el estado más reciente desde
+  el primer minuto.
+
+#### Eliminado
+
+- `sensor.py`: 3 clases de coste + `_CostSensorMixin` +
+  `_tariff_params_from_settings` + helpers de push de coste (~600
+  líneas, ~40 % del archivo).
+- `const.py`: `SIGNAL_CLEAR_COST_STATS`.
+- `statistics_helpers.py`: `is_cost_stream_regression` (la
+  asimetría que pretendía proteger ya no existe — sin entidad no
+  hay segundo escritor del que divergir).
+- `__init__.py`: `_migrate_cost_stats_v054` (la migración v0.5.4 ya
+  no aplica; el flag `cost_stats_v054_migrated` se preserva en
+  `entry.data` por compatibilidad de almacenamiento pero no se lee).
+- `tests/test_clear_cost_stats_dispatch.py` (la señal del dispatcher
+  desaparece junto a la entidad).
+
+#### Añadido
+
+- `custom_components/canal_isabel_ii/cost_publisher.py` (~370
+  líneas, ~285 sin docstring) — publisher puro, sin estado mutable.
+- `tests/test_cost_publisher.py` — 10 tests end-to-end con un fake
+  HomeAssistant + recorder mockeado: deshabilitado, lecturas vacías,
+  sin contrato coincidente, settings malformados, vigencia ausente
+  (caso "backfill enero 2024 con sólo 2025+ modelado"), cold start, y
+  replay con stats previos.
+- `tests/test_no_cost_entities_v060.py` — guard AST que falla si
+  alguien re-introduce alguna de las 3 clases de coste o el mixin.
+  Pin defensivo: el rediseño es la solución estructural; revivir
+  cualquiera de esas clases reabre el bug.
+- `docs/v0.6.0-redesign.md` — documento de diseño con la motivación,
+  invariantes, plan de migración y casos de borde considerados.
+
+#### Tests
+
+**240 tests** (eran 234 en v0.5.23, neto +6 después de eliminar 7
+tests obsoletos de `is_cost_stream_regression`, eliminar 7 tests de
+`test_clear_cost_stats_dispatch.py`, actualizar 2 tests de handlers
+del dispatcher, y añadir 11 tests nuevos: 10 de cost_publisher + 1
+guard de no-revival).
+
+`tests/test_continuation_stats.py::TestCostPushPipelineMonotonicity`
+queda intacto — ese pipeline lo sigue usando el publisher
+(cumulative_to_deltas + merge_forward_and_backfill).
+
+#### Por qué este es un major-bump (0.5.x → 0.6.0)
+
+- **Eliminación de entidades públicas** (sensor.<install>_coste_acumulado,
+  precio_actual, bloque_tarifario_actual). Cualquier automatización,
+  template o card que las referenciase deja de funcionar.
+- **Acción requerida del usuario** en el panel Energía (re-seleccionar
+  la estadística como fuente de coste de agua).
+- **Eliminación de un servicio**: `clear_cost_stats` se mantiene
+  documentado pero ya no envía la señal del dispatcher (no hay
+  entidad que la recoja); sólo limpia la estadística del recorder.
+
+Quien sólo use el panel Energía con el sensor de **consumo** (m³ /
+litros) — la mayoría de instalaciones — no nota nada salvo que el
+log queda más limpio (sin tracebacks de `RuntimeError`, sin reintentos
+de push divergentes).
+
 ## [0.5.23] — 2026-04-26
 
 ### Arreglado — `RuntimeError` en handlers del dispatcher (HA 2026.x)

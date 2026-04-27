@@ -15,52 +15,6 @@ from __future__ import annotations
 from datetime import datetime
 
 
-def is_cost_stream_regression(
-    latest: float,
-    restored: float | None,
-    threshold: float = 0.01,
-) -> bool:
-    """Return True if ``latest`` cumulative cost has regressed below ``restored``.
-
-    Used by both ``CanalCumulativeCostSensor.native_value`` (entity
-    state guard) and ``CanalCumulativeCostSensor._push_cost_statistics_locked``
-    (recorder push guard). Sharing the predicate keeps the two paths
-    in lockstep — if the entity state holds at the old value, the push
-    must skip too, otherwise the recorder ends up with a series whose
-    sum drops below the entity state's sum and the Energy panel
-    renders the seam as a large negative bar (the v0.5.20 regression
-    that recurred even after ``clear_cost_stats`` because nothing in
-    the push path mirrored the state-side guard).
-
-    ## Why a threshold
-
-    Floating-point noise in :func:`compute_hourly_cost_stream` can
-    produce cum_eur values that differ by sub-cent amounts between
-    runs (e.g. tariff segment splits at vigencia boundaries, or
-    division-by-period_m3 in :func:`per_m3_with_iva` rounding
-    differently when the sum of liters changes by 1 mL). A bare
-    ``latest < restored`` would flag those as regressions and freeze
-    the sensor on noise. The default 1-cent threshold absorbs that —
-    real regressions are at minimum one bimonth's cuota fija (≈ 18 €
-    for diametro=15, n_viv=1), nowhere near the threshold.
-
-    ## Edge cases
-
-    - ``restored is None`` (fresh install, no prior state to compare
-      against): never a regression, always returns False so the
-      cold-start push runs.
-    - ``latest == restored`` (idempotent recompute): not a regression,
-      returns False so the push proceeds and re-asserts the same
-      values to the recorder (cheap upsert, keeps the seam-detection
-      logic in :func:`merge_forward_and_backfill` calibrated).
-    - ``latest`` slightly below ``restored`` but within threshold:
-      not a regression — covers the floating-point noise case above.
-    """
-    if restored is None:
-        return False
-    return latest < restored - threshold
-
-
 def continuation_stats(
     items: list[tuple[datetime, float]],
     last_sum: float = 0.0,

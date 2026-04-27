@@ -83,6 +83,7 @@ from .const import (
     INGEST_URL_PREFIX,
     MAX_INGEST_BYTES,
 )
+from .cost_publisher import publish_cost_stream
 from .csv_parser import parse_csv
 from .meter_summary_parser import (
     parse_meter_summary_from_dict,
@@ -305,6 +306,23 @@ class CanalIngestView(HomeAssistantView):
                 )
             else:
                 await coordinator.async_request_refresh()
+
+            # v0.6.0: cost is no longer an entity, it's a long-term
+            # statistic published once per POST. The publisher is a
+            # no-op when the cost feature is disabled or when the
+            # merged store has no readings for this contract; failures
+            # never propagate (the ingest must succeed independently
+            # of the cost path). See ``cost_publisher.py`` for the
+            # rationale.
+            cost_settings = entry_data.get("cost") or {}
+            await publish_cost_stream(
+                self.hass,
+                entry_id,
+                posted_contract,
+                install_name,
+                cost_settings,
+                store.readings,
+            )
 
         _LOGGER.info(
             "[%s] Ingest OK — contract=%s total=%d new=%d meter=%s first=%s",
