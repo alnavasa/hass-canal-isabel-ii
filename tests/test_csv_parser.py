@@ -125,7 +125,9 @@ class TestParseCsv:
         )
         rows = parse_csv(raw)
         assert len(rows) == 1
-        assert rows[0].timestamp == datetime(2026, 4, 22, 3, 0)
+        # Interval-ending convention: "22/04/2026 03" reports the hour
+        # 02:00-03:00, so the row's start timestamp is 02:00.
+        assert rows[0].timestamp == datetime(2026, 4, 22, 2, 0)
 
     def test_skips_malformed_liters(self):
         raw = (
@@ -151,6 +153,36 @@ class TestParseCsv:
         rows = parse_csv(CSV_SEMICOLON)
         for r in rows:
             assert r.timestamp.tzinfo is None
+
+    def test_interval_ending_to_interval_starting_shift(self):
+        # The portal labels rows by the END of the hour they describe
+        # ("HH=07" reports the 06:00→07:00 consumption). HA's
+        # external_statistics expects START-of-hour timestamps. The
+        # parser bridges the two conventions by subtracting 1h.
+        raw = (
+            "Contrato;Periodo;Contador;Dirección;Frecuencia;Fecha/Hora;Consumo (litros)\n"
+            "999000001;F;M;A;Horaria;22/04/2026 07;200\n"
+            "999000001;F;M;A;Horaria;22/04/2026 18;350\n"
+            "999000001;F;M;A;Horaria;22/04/2026 21;940\n"
+        )
+        rows = parse_csv(raw)
+        assert [r.timestamp for r in rows] == [
+            datetime(2026, 4, 22, 6, 0),
+            datetime(2026, 4, 22, 17, 0),
+            datetime(2026, 4, 22, 20, 0),
+        ]
+
+    def test_midnight_wraps_to_previous_day(self):
+        # Edge case of the interval-ending shift: row "HH=00" reports
+        # the last hour of the previous day (23:00→00:00 wall-clock),
+        # so the start timestamp is 23:00 the day before.
+        raw = (
+            "Contrato;Periodo;Contador;Dirección;Frecuencia;Fecha/Hora;Consumo (litros)\n"
+            "999000001;F;M;A;Horaria;22/04/2026 00;42\n"
+        )
+        rows = parse_csv(raw)
+        assert len(rows) == 1
+        assert rows[0].timestamp == datetime(2026, 4, 21, 23, 0)
 
     def test_multi_contract_in_one_csv(self):
         raw = (

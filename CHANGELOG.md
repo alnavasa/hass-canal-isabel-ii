@@ -3,6 +3,50 @@
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/).
 
+## [0.6.1] — 2026-06-17
+
+### Corregido — desfase de +1 h en las gráficas horarias
+
+El CSV exportado por la Oficina Virtual etiqueta cada fila por el
+**final** del periodo horario que describe: la fila con
+`Fecha/Hora = "DD/MM/YYYY 07"` reporta el consumo del intervalo
+06:00 → 07:00. El parser asumía la convención opuesta y emitía un
+`Reading` con `timestamp = 07:00`, que el sensor escribía como
+`start = 07:00` en `async_add_external_statistics` — mientras Home
+Assistant interpreta `start` como el **inicio** del intervalo.
+
+Resultado: cada barra del panel Agua aparecía una hora a la derecha
+de cuando realmente se había consumido. Confirmado contra programas
+de riego de hora conocida — un pico de 940 L que el controlador
+ejecutaba a las 20:00–21:03 aparecía en el slot 21:00–22:00 en HA.
+
+**Cambio**: `csv_parser.py` resta una hora al timestamp parseado,
+trasladando todas las filas a la convención start-of-interval. La
+medianoche envuelve correctamente: `"22/04/2026 00"` (consumo
+23:00 → 00:00 del día anterior) se emite como `21/04/2026 23:00`.
+
+#### Migración para usuarios existentes
+
+Las estadísticas ya almacenadas siguen desfasadas; las nuevas
+ingestas se publicarán en slots distintos y convivirán solapadas. Para
+limpiar el histórico:
+
+1. Actualiza a v0.6.1 en HACS y reinicia HA.
+2. En *Ajustes → Sistema → Almacenamiento → Estadísticas*, busca la
+   estadística `canal_isabel_ii:consumption_<contrato>` y bórrala
+   (también la `cost_<contrato>` si tenías la opción de coste activa).
+3. Pulsa el bookmarklet desde la Oficina Virtual con el rango histórico
+   que quieras reconstruir (hasta 60 días por exportación, encadenable).
+
+Los reportes diarios/mensuales/anuales se recalculan solos en el
+siguiente ciclo del recorder.
+
+### Tests
+
+- `test_interval_ending_to_interval_starting_shift` cubre el desfase
+  para horas representativas (07, 18, 21).
+- `test_midnight_wraps_to_previous_day` cubre la envoltura a las 00 h.
+
 ## [0.6.0] — 2026-04-26
 
 ### Cambiado — rediseño: el coste deja de ser una entidad y pasa a ser SOLO una estadística

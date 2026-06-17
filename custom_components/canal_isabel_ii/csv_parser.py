@@ -17,6 +17,16 @@ separator depending on the day; we accept both):
   upstream consumer (sensor → external statistics) is the layer that
   owns timezone normalisation, because it depends on HA's configured
   zone which we don't want to import here.
+* The portal uses an **interval-ENDING** convention: the row labelled
+  ``HH`` reports the litres consumed during the previous hour, i.e.
+  ``(HH-1):00`` → ``HH:00``. Home Assistant's
+  ``async_add_external_statistics`` expects **interval-STARTING**
+  timestamps (the ``start`` of a row is the beginning of the hour it
+  describes). To bridge the two conventions we subtract one hour from
+  every parsed timestamp here, so an ``HH=07`` row becomes ``06:00``
+  in our output and lands in the right hourly bucket on the dashboard.
+  Wrap-around at midnight is intentional: ``HH=00`` reports the last
+  hour of the previous day and is reflected as such.
 * ``Consumo (litros)`` uses Spanish decimals (","). We swap "," for
   "." before ``float()``.
 * Rows with unparseable timestamps OR liters are skipped silently —
@@ -31,7 +41,7 @@ endpoint's status code, not via the parser.
 from __future__ import annotations
 
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 
 from .models import Reading
@@ -60,7 +70,7 @@ def parse_csv(raw: str) -> list[Reading]:
         if not ts_raw:
             continue
         try:
-            ts = datetime.strptime(ts_raw, "%d/%m/%Y %H")
+            ts = datetime.strptime(ts_raw, "%d/%m/%Y %H") - timedelta(hours=1)
         except ValueError:
             continue
         try:
