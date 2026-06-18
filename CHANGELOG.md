@@ -27,19 +27,137 @@ medianoche envuelve correctamente: `"22/04/2026 00"` (consumo
 
 #### Migración para usuarios existentes
 
-Las estadísticas ya almacenadas siguen desfasadas; las nuevas
-ingestas se publicarán en slots distintos y convivirán solapadas. Para
-limpiar el histórico:
+> ⚠ Esta migración solo es necesaria una vez, al actualizar desde
+> v0.6.0 o anterior. Las instalaciones nuevas a partir de v0.6.1
+> arrancan ya con los slots correctos y no requieren ningún paso.
 
-1. Actualiza a v0.6.1 en HACS y reinicia HA.
-2. En *Ajustes → Sistema → Almacenamiento → Estadísticas*, busca la
-   estadística `canal_isabel_ii:consumption_<contrato>` y bórrala
-   (también la `cost_<contrato>` si tenías la opción de coste activa).
-3. Pulsa el bookmarklet desde la Oficina Virtual con el rango histórico
-   que quieras reconstruir (hasta 60 días por exportación, encadenable).
+Tras la actualización persiste un desajuste sutil: el parser nuevo
+emite ya los slots correctos para los CSV **nuevos**, pero el
+coordinator conserva en `<config>/.storage/canal_isabel_ii.<entry_id>`
+los `Reading` cacheados con la convención antigua (sin el `-1 h`
+aplicado). Si no se actúa, las dos fuentes conviven en el recorder y
+las gráficas muestran picos dobles desfasados una hora.
+
+Hay dos rutas en función de cuánto historial quieras preservar.
+
+##### Ruta A — preservar todo el historial (recomendada)
+
+Mantiene todos los `Reading` ya importados, simplemente desplaza sus
+timestamps. Requiere acceso a la consola del host (SSH al HA OS o
+terminal del add-on Advanced SSH).
+
+1. **Actualiza** a v0.6.1 en HACS y reinicia HA para que cargue el
+   parser nuevo.
+2. **Localiza el `entry_id`** del config entry: es el sufijo del
+   archivo `<config>/.storage/canal_isabel_ii.<entry_id>` (ULID de 26
+   caracteres).
+3. **Apaga el core** desde la consola del host para evitar reescrituras
+   del store durante la edición:
+
+   ```sh
+   ha core stop
+   ```
+
+4. **Desplaza los timestamps del store** restando una hora a cada
+   `Reading` (la mayoría de instalaciones tienen unos pocos miles).
+   Sustituye `<entry_id>` por el tuyo:
+
+   ```sh
+   python3 <<'PY'
+   import json, os
+   from datetime import datetime, timedelta
+
+   path = "/config/.storage/canal_isabel_ii.<entry_id>"
+   with open(path) as f:
+       d = json.load(f)
+
+   for r in d.get("data", {}).get("readings", []):
+       ts = datetime.fromisoformat(r["timestamp"])
+       r["timestamp"] = (ts - timedelta(hours=1)).isoformat()
+
+   ms = d.get("data", {}).get("meter_summary")
+   if ms and ms.get("reading_at"):
+       ts = datetime.fromisoformat(ms["reading_at"])
+       ms["reading_at"] = (ts - timedelta(hours=1)).isoformat()
+
+   tmp = path + ".new"
+   with open(tmp, "w") as f:
+       json.dump(d, f, separators=(",", ":"))
+   os.replace(tmp, path)   # rename atómico
+   print("store desplazado")
+   PY
+   ```
+
+5. **Borra las estadísticas viejas** desde *Ajustes → Sistema →
+   Almacenamiento → Estadísticas*, busca
+   `canal_isabel_ii:consumption_<contrato>` (y `cost_<contrato>` si la
+   tenías) y pulsa el icono de la papelera. Alternativa por SQL para
+   borrar ambas en una sola transacción:
+
+   ```sh
+   sqlite3 /config/home-assistant_v2.db <<'SQL'
+   BEGIN IMMEDIATE;
+   DELETE FROM statistics
+    WHERE metadata_id IN (SELECT id FROM statistics_meta
+                          WHERE statistic_id LIKE 'canal_isabel_ii:%');
+   DELETE FROM statistics_short_term
+    WHERE metadata_id IN (SELECT id FROM statistics_meta
+                          WHERE statistic_id LIKE 'canal_isabel_ii:%');
+   DELETE FROM statistics_meta
+    WHERE statistic_id LIKE 'canal_isabel_ii:%';
+   COMMIT;
+   SQL
+   ```
+
+6. **Reanuda el core**:
+
+   ```sh
+   ha core start
+   ```
+
+7. **Invoca el servicio `canal_isabel_ii.refresh`** desde *Herramientas
+   para desarrolladores → Acciones* (deja vacío el campo `instance`).
+   El servicio llama `await coord.async_request_refresh()`, que
+   notifica a los listeners y dispara `_push_statistics()` con
+   `last_start = None`: el sensor recorre los `Reading` del store
+   (ya desplazados) y rellena el recorder en un solo paso, desde sum
+   = 0 hasta la última hora cacheada.
+
+   *Por qué este paso es necesario:* al volver de un reload, Home
+   Assistant monta las entidades pero no genera un update del
+   coordinator, así que `_handle_coordinator_update` no se ejecuta y
+   las estadísticas no se republican automáticamente. Pulsar el
+   bookmarklet tampoco basta si los `Reading` que envía ya están en
+   el store: el ingest contesta "Lecturas importadas: N, Nuevas: 0" y
+   no propaga el evento al coordinator. El servicio `refresh` está
+   pensado precisamente para este caso.
+
+Verifica desde el panel Agua que los picos cuadran con tus programas
+de riego o cualquier consumo de hora conocida. El total acumulado
+queda idéntico al anterior — solo se desplaza un slot a la izquierda.
+
+##### Ruta B — limpio sin tocar archivos (pierde el historial previo)
+
+Más simple, pero solo recuperas hasta 60 días por click del bookmarklet
+y tienes que encadenar varios para reconstruir más atrás.
+
+1. **Actualiza** a v0.6.1 en HACS y reinicia HA.
+2. **Borra el store local** desde la consola del host:
+
+   ```sh
+   rm /config/.storage/canal_isabel_ii.<entry_id>
+   ```
+
+3. **Borra las estadísticas viejas** como en el paso 5 de la Ruta A.
+4. **Recarga la integración** desde *Ajustes → Dispositivos y
+   Servicios → Canal de Isabel II → ⋮ → Recargar*. El coordinator
+   arranca con el store vacío.
+5. **Pulsa el bookmarklet** desde la Oficina Virtual con los rangos
+   que quieras reconstruir (hasta 60 días por exportación, encadenable
+   hacia atrás).
 
 Los reportes diarios/mensuales/anuales se recalculan solos en el
-siguiente ciclo del recorder.
+siguiente ciclo del recorder en ambas rutas.
 
 ### Tests
 
