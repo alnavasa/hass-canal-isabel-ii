@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 DOMAIN = "canal_isabel_ii"
 
@@ -185,3 +186,9 @@ MAX_READINGS_PER_ENTRY = 8760
 #: cost stat continues forward via the publisher's ``last_sum`` anchor
 #: on the next POST.
 SIGNAL_METER_RESET = "canal_isabel_ii_meter_reset_{entry_id}_{contract_id}"
+
+# ---------------------------------------------------------------------
+# Time zone
+# ---------------------------------------------------------------------
+
+TZ = ZoneInfo("Europe/Madrid")
