@@ -11,6 +11,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from homeassistant.util import dt as dt_util
+
+from .const import TZ
+
+
+def _ensure_utc(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        # Old data from v0.5.x and earlier was stored as naive local time.
+        ts = ts.replace(tzinfo=TZ)
+    return dt_util.as_utc(ts)
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -29,7 +40,9 @@ class Reading:
     meter: str
     address: str
     frequency: str
-
+    
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp", _ensure_utc(self.timestamp))
 
 @dataclass(frozen=True)
 class MeterSummary:

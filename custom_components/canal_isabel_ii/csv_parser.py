@@ -41,9 +41,10 @@ endpoint's status code, not via the parser.
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta
+from datetime import datetime, UTC
 from io import StringIO
 
+from .const import TZ
 from .models import Reading
 
 
@@ -65,12 +66,18 @@ def parse_csv(raw: str) -> list[Reading]:
     except csv.Error:
         dialect = csv.excel  # comma default — Canal's normal output
     reader = csv.DictReader(StringIO(raw), dialect=dialect)
+    prev_utc = None
     for row in reader:
         ts_raw = (row.get("Fecha/Hora") or "").strip()
         if not ts_raw:
             continue
         try:
-            ts = datetime.strptime(ts_raw, "%d/%m/%Y %H") - timedelta(hours=1)
+            nh = datetime.strptime(ts_raw, "%d/%m/%Y %H")
+            ts = nh.replace(tzinfo=TZ, fold=0)
+            # Repeated hour during October DST change. If it is the same is the second pass
+            if prev_utc and ts.astimezone(UTC) <= prev_utc:
+                ts = nh.replace(tzinfo=TZ, fold=1)
+            prev_utc = ts.astimezone(UTC)
         except ValueError:
             continue
         try:
